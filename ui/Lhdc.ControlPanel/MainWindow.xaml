@@ -1,0 +1,100 @@
+<Window x:Class="Lhdc.ControlPanel.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="LHDC Control Panel" Width="920" Height="640" MinWidth="820" MinHeight="560"
+    Background="#F7F9FC" Foreground="{StaticResource Ink}" FontFamily="Microsoft YaHei UI"
+    UseLayoutRounding="True" TextOptions.TextFormattingMode="Display"
+    WindowStartupLocation="CenterScreen" Loaded="OnLoaded" Closing="OnClosing">
+    <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="168"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Border Background="White" BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0">
+            <Grid Margin="16,28,16,22">
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <StackPanel Margin="12,0,0,30">
+                    <TextBlock Text="LHDC" FontSize="27" FontWeight="SemiBold" Foreground="{StaticResource Accent}"/>
+                    <TextBlock Text="蓝牙音频" Style="{StaticResource Hint}" Margin="1,5,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Row="1">
+                    <Button x:Name="SettingsNav" Content="音频设置" Click="ShowSettings" Style="{StaticResource SelectedNavigation}" Margin="0,0,0,8"/>
+                    <Button x:Name="DiagnosticsNav" Content="诊断日志" Click="ShowDiagnostics" Style="{StaticResource Navigation}"/>
+                </StackPanel>
+                <TextBlock Grid.Row="3" Text="v0.8" Style="{StaticResource Hint}" Margin="12,0,0,0"/>
+            </Grid>
+        </Border>
+        <Grid Grid.Column="1" Margin="28,26,28,22">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid Margin="0,0,0,22">
+                <TextBlock x:Name="PageTitle" Text="音频设置" FontSize="24" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Button x:Name="RefreshButton" Content="刷新" HorizontalAlignment="Right" Click="RefreshClick" Padding="16,8"/>
+            </Grid>
+            <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,18" Padding="20">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="58"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Border Background="#EFF6FF" Width="42" Height="42" CornerRadius="10" HorizontalAlignment="Left">
+                        <TextBlock Text="&#xE7F6;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource Accent}" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="OPPO Enco X4" FontSize="18" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="DriverText" Style="{StaticResource Hint}" Margin="0,5,0,0"/>
+                    </StackPanel>
+                    <Border x:Name="ConnectionFrame" Grid.Column="2" Background="#F1F5F9" CornerRadius="12" Padding="11,5" VerticalAlignment="Center">
+                        <TextBlock x:Name="ConnectionBadge" Text="查询中" FontSize="12" Foreground="{StaticResource Muted}"/>
+                    </Border>
+                </Grid>
+            </Border>
+            <Grid Grid.Row="2">
+                <ScrollViewer x:Name="SettingsView" VerticalScrollBarVisibility="Auto">
+                    <Border Style="{StaticResource Card}" VerticalAlignment="Top">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="132"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="设备驱动" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="1">
+                                    <ComboBox x:Name="ModeBox" SelectionChanged="ModeChanged" AutomationProperties.Name="设备驱动">
+                                        <ComboBoxItem Content="LHDC V5" Tag="lhdc"/><ComboBoxItem Content="Windows 标准音频" Tag="windows"/>
+                                    </ComboBox>
+                                    <TextBlock x:Name="ModeHint" Text="编码方式由 Windows 管理。" Style="{StaticResource Hint}" Margin="0,8,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                            <Border Height="1" Background="{StaticResource Line}" Margin="0,24"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="132"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="采样格式" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock x:Name="FormatText" Text="连接设备后显示" FontSize="16" FontWeight="SemiBold"/>
+                                    <Grid x:Name="FormatSelectors">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <ComboBox x:Name="SampleRateBox" DisplayMemberPath="Label" AutomationProperties.Name="播放采样率" SelectionChanged="FormatChanged"/>
+                                        <ComboBox x:Name="BitDepthBox" Grid.Column="2" DisplayMemberPath="Label" AutomationProperties.Name="播放位深" SelectionChanged="FormatChanged"/>
+                                    </Grid>
+                                    <TextBlock x:Name="FormatHint" Style="{StaticResource Hint}" Margin="0,7,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <Button Grid.Column="2" Content="声音设置 ↗" Click="OpenSoundSettingsClick" Style="{StaticResource LinkButton}" VerticalAlignment="Center"/>
+                            </Grid>
+                            <Grid x:Name="ParameterGrid" Margin="0,26,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="132"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="LHDC 码率" VerticalAlignment="Center"/>
+                                <ComboBox x:Name="BitrateBox" Grid.Column="1" DisplayMemberPath="Label" AutomationProperties.Name="LHDC 码率" SelectionChanged="ParameterChanged"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </ScrollViewer>
+                <Border x:Name="DiagnosticsView" Visibility="Collapsed" Style="{StaticResource Card}" Padding="20">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Grid Margin="0,0,0,16">
+                            <TextBlock Text="设备状态与操作记录" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <Button Content="打开日志" HorizontalAlignment="Right" Click="OpenLogsClick" Padding="12,7"/>
+                        </Grid>
+                        <TextBox x:Name="LogBox" Grid.Row="1" IsReadOnly="True" FontFamily="Consolas, Microsoft YaHei UI" FontSize="12" Background="#F8FAFC" BorderThickness="0" Padding="12" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+                    </Grid>
+                </Border>
+            </Grid>
+            <Grid Grid.Row="3" Margin="0,20,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock x:Name="StatusText" Text="正在读取设备…" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="0,0,18,0"/>
+                <Button x:Name="SaveButton" Grid.Column="1" Content="应用设置" Style="{StaticResource Primary}" Width="164" Height="42" Click="SaveClick"/>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,4 @@
+#pragma once
+NTSTATUS LhdcLoadPlaybackFormat(KSDATAFORMAT_WAVEFORMATEXTENSIBLE* format,KSDATARANGE_AUDIO* range);
+NTSTATUS PropertyHandler_LhdcJackConfig(PPCPROPERTY_REQUEST request);
+NTSTATUS PropertyHandler_LhdcModeFormats(PPCPROPERTY_REQUEST request);

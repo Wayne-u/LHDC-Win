@@ -1,0 +1,58 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=Bluetooth
+ClassGuid={e0cbf06c-cd8b-4647-bb8a-263b43f0f974}
+Provider=%Provider%
+DriverVer=10/05/2026,0.6.0.0
+CatalogFile=lhdc-transport.cat
+PnpLockdown=1
+
+[Manufacturer]
+%Provider%=Models,NTamd64.10.0...28000
+
+[Models.NTamd64.10.0...28000]
+; Deliberately matches only the observed OPPO Audio Sink hardware ID.
+; Binding must still be selected and checked for the exact device instance.
+%DeviceDesc%=Transport,BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}_VID&000102b0_PID&0000
+
+[DestinationDirs]
+DriverFiles=13
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+lhdc-transport.sys=1
+
+[Transport.NT]
+CopyFiles=DriverFiles
+
+[DriverFiles]
+lhdc-transport.sys
+
+[Transport.NT.HW]
+AddReg=Security
+
+[Security]
+HKR,,Security,0x00000000,"D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+[Transport.NT.Services]
+AddService=lhdc-transport,0x00000002,Service
+
+[Service]
+DisplayName=%DeviceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\lhdc-transport.sys
+
+[Transport.NT.Wdf]
+KmdfService=lhdc-transport,Wdf
+
+[Wdf]
+KmdfLibraryVersion=1.35
+
+[Strings]
+Provider="Windows LHDC Prototype"
+DeviceDesc="Enco X4 LHDC A2DP Driver"
+DiskName="Windows LHDC transport"

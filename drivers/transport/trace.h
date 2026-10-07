@@ -1,0 +1,6 @@
+#pragma once
+#define WPP_CONTROL_GUIDS \
+    WPP_DEFINE_CONTROL_GUID(LhdcTransportTrace,(67A00BC6,98CB,4A32,9CB0,50C97716C708), \
+        WPP_DEFINE_BIT(TRACE_TRANSPORT))
+#define WPP_LEVEL_FLAGS_LOGGER(level,flags) WPP_LEVEL_LOGGER(flags)
+#define WPP_LEVEL_FLAGS_ENABLED(level,flags) (WPP_LEVEL_ENABLED(flags) && WPP_CONTROL(WPP_BIT_ ## flags).Level >= level)

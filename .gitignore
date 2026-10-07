@@ -1,0 +1,6 @@
+/build/
+/.vs/
+/evidence/local/
+*.user
+/ui/**/obj/
+/ui/**/bin/

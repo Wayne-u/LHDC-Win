@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{E61BF8B2-D882-4AD9-A492-DB6CAB921BAE}</ProjectGuid>
+    <Configuration Condition="'$(Configuration)'==''">Release</Configuration>
+    <Platform Condition="'$(Platform)'==''">x64</Platform>
+    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType><DriverType>KMDF</DriverType>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform><TargetVersion>Windows10</TargetVersion>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+    <KmdfVersion>1.35</KmdfVersion>
+    <SignMode>Off</SignMode>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>lhdc-transport</TargetName>
+    <OutDir>$(ProjectDir)..\..\build\driver\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\..\build\driver\obj\$(Configuration)\</IntDir>
+    <EnableInf2Cat>true</EnableInf2Cat>
+    <Inf2CatWindowsVersionList>10_GE_X64</Inf2CatWindowsVersionList>
+    <!-- WDK 28000's managed PackageVerifier throws NullReferenceException here.
+         Run the installed native verifier with strict Windows Driver rules. -->
+    <SkipPackageVerification>true</SkipPackageVerification>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <WppEnabled>true</WppEnabled><WppKernelMode>true</WppKernelMode>
+      <WppTraceFunction>TraceEvents(LEVEL,FLAGS,MSG,...)</WppTraceFunction>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="transport.c" /><ClCompile Include="audio_child.c"><WppEnabled>false</WppEnabled></ClCompile></ItemGroup>
+  <ItemGroup><ClInclude Include="trace.h" /><ClInclude Include="..\..\include\lhdc_transport.h" /></ItemGroup>
+  <ItemGroup><Inf Include="lhdc-transport.inf" /><FilesToPackage Include="$(TargetPath)" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="ValidateInfWithCli" AfterTargets="StampInf">
+    <Exec Command="&quot;$(WDKContentRoot)Tools\$(WindowsTargetPlatformVersion)\x64\infverif.exe&quot; /w /v &quot;$(OutDir)lhdc-transport.inf&quot;" />
+  </Target>
+</Project>

@@ -1,0 +1,6 @@
+[submodule "third_party/lhdcv5"]
+	path = third_party/lhdcv5
+	url = https://github.com/WillyBilly06/LHDC-V5-Encoder.git
+[submodule "third_party/windows-driver-samples"]
+	path = third_party/windows-driver-samples
+	url = https://github.com/microsoft/Windows-driver-samples.git

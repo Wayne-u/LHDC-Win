@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{07A34E3A-C331-4EE9-94D2-9AF1AB6624F4}</ProjectGuid><WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Driver</ConfigurationType><DriverType>KMDF</DriverType><DriverTargetPlatform>Desktop</DriverTargetPlatform><TargetVersion>Windows10</TargetVersion><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries><KmdfVersion>1.35</KmdfVersion><SignMode>Off</SignMode></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>lhdc-audio</TargetName><OutDir>$(ProjectDir)..\..\build\audio-driver\</OutDir><IntDir>$(ProjectDir)..\..\build\audio-driver\obj\</IntDir>
+    <AudioSource>$(ProjectDir)..\..\build\audio-reference\Source\</AudioSource>
+    <EnableInf2Cat>true</EnableInf2Cat><Inf2CatWindowsVersionList>10_GE_X64</Inf2CatWindowsVersionList><SkipPackageVerification>true</SkipPackageVerification>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)..\..\include;$(AudioSource)Main;$(AudioSource)Inc;$(AudioSource)Filters;$(AudioSource)Utilities;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><PreprocessorDefinitions>_WIN32;UNICODE;_UNICODE;PC_IMPLEMENTATION;_USE_WAVERT_;_USE_IPortClsRuntimePower;_NEW_DELETE_OPERATORS_;DEBUG_LEVEL=DEBUGLVL_TERSE;%(PreprocessorDefinitions)</PreprocessorDefinitions><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><ExceptionHandling></ExceptionHandling><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions></ClCompile>
+    <Link><AdditionalDependencies>portcls.lib;stdunk.lib;libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="pcm_bridge.cpp" /><ClCompile Include="format_config.cpp" /><ClCompile Include="$(AudioSource)Main\adapter.cpp" /><ClCompile Include="$(AudioSource)Main\basetopo.cpp" /><ClCompile Include="$(AudioSource)Main\common.cpp" /><ClCompile Include="$(AudioSource)Main\mintopo.cpp" /><ClCompile Include="$(AudioSource)Main\minwavert.cpp" /><ClCompile Include="$(AudioSource)Main\minwavertstream.cpp" /><ClCompile Include="$(AudioSource)Main\NewDelete.cpp" />
+    <ClCompile Include="$(AudioSource)Filters\speakertopo.cpp" /><ClCompile Include="$(AudioSource)Utilities\hw.cpp" /><ClCompile Include="$(AudioSource)Utilities\kshelper.cpp" />
+  </ItemGroup>
+  <ItemGroup><Inf Include="lhdc-audio.inf" /><FilesToPackage Include="$(TargetPath)" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="ValidateInfWithCli" AfterTargets="StampInf"><Exec Command="&quot;$(WDKContentRoot)Tools\$(WindowsTargetPlatformVersion)\x64\infverif.exe&quot; /w /v &quot;$(OutDir)lhdc-audio.inf&quot;" /></Target>
+</Project>
