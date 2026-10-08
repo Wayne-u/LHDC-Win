@@ -7,6 +7,7 @@ include(CTest)
 set(LHDCV5_BUILD_TESTS ON CACHE BOOL "Build upstream reference encoder")
 add_subdirectory(third_party/lhdcv5)
 add_library(lhdc_core
+    src/control/hey_melody.cpp
     src/avrcp/protocol.cpp
     src/avdtp/protocol.cpp
     src/avdtp/lhdc_v5.cpp
@@ -25,8 +26,8 @@ endif()
 add_executable(lhdc-host src/host/main.cpp)
 target_link_libraries(lhdc-host PRIVATE lhdc_core)
 if(WIN32)
-    add_library(lhdc_windows src/transport/windows.cpp src/host/signalling.cpp src/host/pacer.cpp src/host/media_session.cpp src/audio/direct_pcm.cpp src/audio/pcm_converter.cpp src/audio/pcm_reader.cpp src/audio/volume_sync.cpp src/audio/hfp_activity.cpp src/service/status.cpp)
-    target_link_libraries(lhdc_windows PUBLIC lhdc_core setupapi cfgmgr32 Bthprops ole32 avrt uuid advapi32)
+    add_library(lhdc_windows src/control/rfcomm.cpp src/transport/windows.cpp src/host/signalling.cpp src/host/pacer.cpp src/host/media_session.cpp src/audio/direct_pcm.cpp src/audio/pcm_converter.cpp src/audio/pcm_reader.cpp src/audio/volume_sync.cpp src/audio/hfp_activity.cpp src/service/status.cpp)
+    target_link_libraries(lhdc_windows PUBLIC lhdc_core setupapi cfgmgr32 Bthprops ole32 avrt uuid advapi32 ws2_32)
     target_compile_definitions(lhdc_windows PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_sources(lhdc-host PRIVATE src/audio/wasapi.cpp)
     target_link_libraries(lhdc-host PRIVATE lhdc_windows)
@@ -52,6 +53,9 @@ if(MSVC)
     target_compile_options(lhdc-host PRIVATE /W4 /WX /utf-8)
 endif()
 if(BUILD_TESTING)
+    add_executable(lhdc-control-tests tests/control_tests.cpp)
+    target_link_libraries(lhdc-control-tests PRIVATE lhdc_core)
+    add_test(NAME earbud_control COMMAND lhdc-control-tests)
     add_executable(lhdc-avrcp-tests tests/avrcp_tests.cpp)
     target_link_libraries(lhdc-avrcp-tests PRIVATE lhdc_core)
     add_test(NAME avrcp COMMAND lhdc-avrcp-tests)

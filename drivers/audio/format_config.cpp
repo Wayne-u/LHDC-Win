@@ -25,8 +25,8 @@ NTSTATUS LhdcLoadPlaybackFormat(KSDATAFORMAT_WAVEFORMATEXTENSIBLE* format,KSDATA
     if (value->Type!=REG_BINARY || value->DataLength!=3*sizeof(ULONG)) return STATUS_DEVICE_CONFIGURATION_ERROR;
     ULONG profile[3];RtlCopyMemory(profile,value->Data,sizeof(profile));
     const auto rate=profile[0],bits=profile[1];
-    // This target's real SDP capabilities are 44.1/48 kHz and 16/24-bit.
-    if ((rate!=44100 && rate!=48000) || (bits!=16 && bits!=24)) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    // The host verifies the earbud's current capabilities before selecting a profile.
+    if ((rate!=44100 && rate!=48000 && rate!=96000 && rate!=192000) || (bits!=16 && bits!=24)) return STATUS_DEVICE_CONFIGURATION_ERROR;
     auto& wave=format->WaveFormatExt;
     const auto inputBits=bits;
     const auto subtype=KSDATAFORMAT_SUBTYPE_PCM;

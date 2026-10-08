@@ -6,7 +6,7 @@
 
 | 命令 | 范围 | 前提与影响 |
 | --- | --- | --- |
-| `pwsh -NoProfile -File scripts/Build.ps1` | 七项 CTest：核心协议、AVRCP、PCM、日志、Windows 转换、读取线程、长测判定 | 无需耳机；不安装驱动 |
+| `pwsh -NoProfile -File scripts/Build.ps1` | 八项 CTest：耳机控制协议、核心协议、AVRCP、PCM、日志、Windows 转换、读取线程、长测判定 | 无需耳机；不安装驱动 |
 | `pwsh -NoProfile -File scripts/Verify.ps1` | 九个编码器 SHA256 向量、非法参数、60 秒离线编码、Unicode 路径及所有当前能力配置的 RTP 序列/时间戳/边界 | 不播放、不绑定驱动；MTU 672 是离线预算 |
 | `pwsh -NoProfile -File scripts/Verify-Deployment.ps1` | 有效包、SYS/INF/CAT 篡改、错误签名公钥和错误目标实例 | 不修改信任库、启动配置或驱动绑定 |
 | `pwsh -NoProfile -File scripts/Verify-UnifiedEndpoint.ps1` | 44.1/48 kHz × 16/24 位单端点、实际 WaveRT PCM、24 位低字节 | 管理员、耳机连接；切换格式并暂停服务，结束恢复原格式；不验证蓝牙听音 |
@@ -15,7 +15,9 @@
 
 长测分钟数可以调整；30 分钟以上验证目前由用户暂缓。测试期间不要取下、断开或切换耳机到手机，避免将连接变化误判为链路缺陷。持续播放验证先核对服务二进制与当前构建一致；完成渲染不等于严格零丢弃，失败原因在 `FailureReasons` 中。
 
-读取线程回归用受控停顿验证样本顺序：四种格式下 355 ms 停顿零丢弃，700 ms 停顿明确报告溢出。纯日志判定测试检查错误、发送未完成、挂起、主动丢弃及缺失字段，避免通过指标缺失掩盖失败。
+启用并读回 Hi-Res 后，可给 `Verify-UnifiedEndpoint.ps1` 传入 `-SampleRates 96000,192000`，验证高采样率的单端点与实际 PCM。该脚本会关闭发送服务，不能代替蓝牙听音。`profile-options HEX [MTU]` 可按无线载荷预算过滤码率；离线验证使用 672 字节 MTU，因此不包含单帧无法容纳的 44.1 kHz / 1000 kbps。
+
+读取线程回归用受控停顿验证样本顺序：44.1/48/96/192 kHz × 16/24 位下 355 ms 停顿零丢弃，700 ms 停顿明确报告溢出。纯日志判定测试检查错误、发送未完成、挂起、主动丢弃及缺失字段，避免通过指标缺失掩盖失败。
 
 ## 诊断命令
 
@@ -24,6 +26,7 @@
 | 命令 | 用途 |
 | --- | --- |
 | `target`、`inspect`、`audio-status`、`audio-devices`、`audio-inputs`、`hfp-status` | 只读查询传输、服务、端点和麦克风状态 |
+| `hires`、`hires on`、`hires off` | 读取或切换耳机 Hi-Res；需要耳机连接；写入须 ACK 和读回均成功，切换后刷新 AVDTP 能力 |
 | `direct-pcm`、`direct-formats` | 只读核验实际 WaveRT 状态与格式列表 |
 | `playback-ready ENDPOINT RATE BITS` | 初始化客户端检查格式，不启动播放 |
 | `render-wav ENDPOINT WAV [REPEATS]` | 同一客户端持续提交指定 WAV，仅用于开发验证 |

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include "control/rfcomm.hpp"
 namespace lhdc {
 void inspect_audio_service() {
     const auto manager=OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT);
@@ -28,8 +29,16 @@ void inspect_audio_service() {
     if (cached==ERROR_SUCCESS) caps.resize(caps_size);
     else if (cached==ERROR_FILE_NOT_FOUND) caps.clear();
     else throw std::runtime_error("Peer capability cache read failed, Win32="+std::to_string(cached));
+    DWORD peer_revision=0,revision_size=sizeof(peer_revision);
+    const auto revision_error=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilityRevision",RRF_RT_REG_DWORD,nullptr,&peer_revision,&revision_size);
+    if(revision_error!=ERROR_SUCCESS && revision_error!=ERROR_FILE_NOT_FOUND) throw std::runtime_error("Cached capability revision read failed, Win32="+std::to_string(revision_error));
+    const auto current_revision=capability_revision();
+    if(peer_revision!=current_revision) caps.clear();
+    DWORD mtu=0,mtu_size=sizeof(mtu);
+    const auto mtu_error=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerMediaMtu",RRF_RT_REG_DWORD,nullptr,&mtu,&mtu_size);
+    if(mtu_error!=ERROR_SUCCESS && mtu_error!=ERROR_FILE_NOT_FOUND) throw std::runtime_error("Media MTU cache read failed, Win32="+std::to_string(mtu_error));
     std::cout << "{\"event\":\"audio_service\",\"installed\":true,\"running\":" << (status.dwCurrentState==SERVICE_RUNNING?"true":"false")
         << ",\"state\":" << status.dwCurrentState << ",\"pid\":" << status.dwProcessId << ",\"profile_editable\":" << (writable==ERROR_SUCCESS?"true":"false")
-        << ",\"peer_capabilities\":" << json_string(avdtp::hex(caps)) << "}\n";
+        << ",\"peer_capabilities\":" << json_string(avdtp::hex(caps)) << ",\"capability_revision\":"<<current_revision<<",\"media_mtu\":"<<mtu<<"}\n";
 }
 }

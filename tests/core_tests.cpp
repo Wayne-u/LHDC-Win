@@ -21,6 +21,9 @@ template<class F> static void rejects(F function,const char* message) {
 }
 int main() {
     try {
+        require(lhdc::encoded_frame_bytes({44100,24,1000})==682,"44.1 kHz 1000 kbps needs a larger MTU");
+        require(lhdc::encoded_frame_bytes({48000,24,1000})==626,"48 kHz 1000 kbps frame size");
+        rejects([]{lhdc::Encoder encoder({44100,24,1000},658);},"Reject oversized frames before encoding");
         require(av::command(0,av::Signal::discover)==av::Bytes{0,1},"Discover command bytes");
         require(av::command(15,av::Signal::get_capabilities,av::Bytes{4})==av::Bytes{0xf0,2,4},"SEID encoding");
         rejects([]{av::command(16,av::Signal::discover);},"Label range");

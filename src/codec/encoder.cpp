@@ -9,6 +9,7 @@ static void check(std::int32_t status, const char* operation) {
 Encoder::Encoder(std::uint32_t payload_mtu) : Encoder(Profile{},payload_mtu) {}
 Encoder::Encoder(Profile profile,std::uint32_t payload_mtu) : mtu_(payload_mtu),profile_(profile) {
     const auto quality=quality_index(profile);
+    if(encoded_frame_bytes(profile)>payload_mtu) throw std::invalid_argument("A single LHDC frame exceeds the negotiated payload MTU; lower the bitrate");
     handle_.reset(lhdcv5_enc_new(LHDC_VERSION_1));
     if (!handle_) throw std::runtime_error("Encoder allocation failed");
     check(lhdcv5_enc_init_encoder(handle_.get(),profile.sample_rate,profile.bits,quality,mtu_,20),"encoder init");

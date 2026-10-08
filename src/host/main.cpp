@@ -10,6 +10,7 @@
 #include "audio/direct_pcm.hpp"
 #include "audio/hfp_activity.hpp"
 #include "service/status.hpp"
+#include "control/rfcomm.hpp"
 #endif
 #include <iostream>
 #include <fstream>
@@ -113,7 +114,8 @@ static std::uint32_t number(const char* text) {
     if (used!=std::string(text).size()) throw std::invalid_argument("Expected an unsigned integer");
     return static_cast<std::uint32_t>(value);
 }
-static void profile_options(const av::Bytes& raw) {
+static void profile_options(const av::Bytes& raw,std::uint32_t mtu=0) {
+    if(mtu && mtu<=lhdc::media_header_bytes) throw std::invalid_argument("Media MTU is smaller than packet headers");
     const auto caps=av::v5_capabilities(raw);
     std::cout << "{\"event\":\"profile_options\",\"min_kbps\":" << caps.min_kbps << ",\"max_kbps\":" << caps.max_kbps << ",\"bits\":[";
     for (std::size_t i=0;i<caps.bit_depths.size();++i) { if(i) std::cout<<','; std::cout<<caps.bit_depths[i]; }
@@ -125,6 +127,7 @@ static void profile_options(const av::Bytes& raw) {
         bool first=true;
         for (const auto kbps:lhdc::bitrates(rate)) {
             if (kbps<caps.min_kbps || kbps>caps.max_kbps) continue;
+            if(mtu && lhdc::encoded_frame_bytes({rate,16,kbps})>mtu-lhdc::media_header_bytes) continue;
             if (!first) std::cout<<','; first=false; std::cout<<kbps;
         }
         std::cout << "]}";
@@ -134,7 +137,7 @@ static void profile_options(const av::Bytes& raw) {
 static int run(int argc,char** argv) {
     std::cout << std::unitbuf;
     try {
-        if (argc<2) throw std::invalid_argument("Usage: lhdc-host inspect | connection ADDRESS | audio-status | hfp-status | call-probe SECONDS | audio-devices | audio-inputs | direct-pcm | direct-formats | direct-capture SECONDS FILE | render-wav ENDPOINT WAV [REPEATS] | make-test-wav FILE [SECONDS [RATE BITS]] | encode WAV RECORDS [PAYLOAD_MTU [KBPS]] | packetize WAV RECORDS OUT_MTU KBPS | profile-check RATE BITS KBPS | profile-options HEX | configure HEX RATE BITS KBPS | decode-caps HEX");
+        if (argc<2) throw std::invalid_argument("Usage: lhdc-host target | hires [on|off] | inspect | connection ADDRESS | audio-status | hfp-status | call-probe SECONDS | audio-devices | audio-inputs | direct-pcm | direct-formats | direct-capture SECONDS FILE | render-wav ENDPOINT WAV [REPEATS] | make-test-wav FILE [SECONDS [RATE BITS]] | encode WAV RECORDS [PAYLOAD_MTU [KBPS]] | packetize WAV RECORDS OUT_MTU KBPS | profile-check RATE BITS KBPS | profile-options HEX | configure HEX RATE BITS KBPS | decode-caps HEX");
         const std::string command=argv[1];
         if (command=="make-test-wav" && (argc==3 || argc==4 || argc==6 || argc==7)) {
             if (argc==7 && std::string(argv[6])!="--loop") throw std::invalid_argument("Expected --loop after the tone format");
@@ -142,7 +145,7 @@ static int run(int argc,char** argv) {
             std::cout << "{\"event\":\"wav_created\",\"peak_dbfs\":-30,\"left_hz\":440,\"right_hz\":880}\n";
         } else if (command=="encode" && argc>=4 && argc<=6) encode_wav(argv[2],argv[3],argc>=5?number(argv[4]):660,argc==6?number(argv[5]):400);
         else if (command=="packetize" && argc==6) encode_wav(argv[2],argv[3],number(argv[4]),number(argv[5]),true);
-        else if (command=="profile-options" && argc==3) profile_options(av::unhex(argv[2]));
+        else if (command=="profile-options" && (argc==3 || argc==4)) profile_options(av::unhex(argv[2]),argc==4?number(argv[3]):0);
         else if (command=="profile-check" && argc==5) {
             const lhdc::Profile profile{number(argv[2]),number(argv[3]),number(argv[4])};
             std::cout << "{\"event\":\"encoder_profile\",\"quality_index\":" << lhdc::quality_index(profile) << "}\n";
@@ -156,6 +159,9 @@ static int run(int argc,char** argv) {
 #ifdef _WIN32
         else if (command=="inspect" && argc==2) lhdc::inspect_windows();
         else if (command=="target" && argc==2) lhdc::inspect_target();
+        else if (command=="hires" && argc==2) lhdc::inspect_hi_res();
+        else if (command=="hires" && argc==3 && (std::string(argv[2])=="on" || std::string(argv[2])=="off"))
+            lhdc::inspect_hi_res(std::string(argv[2])=="on");
         else if (command=="direct-pcm" && argc==2) lhdc::inspect_direct_pcm();
         else if (command=="direct-formats" && argc==2) lhdc::inspect_direct_formats();
         else if (command=="direct-capture" && argc==4) lhdc::capture_direct_pcm(number(argv[2]),file_path(argv[3]));

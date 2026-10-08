@@ -94,7 +94,7 @@ static void stalled_sender(unsigned rate,unsigned bits,unsigned stall_ms,bool ex
 }
 int main() {
     try {
-        for(const auto rate:{44100u,48000u}) for(const auto bits:{16u,24u}) stalled_sender(rate,bits,355,false);
+        for(const auto rate:{44100u,48000u,96000u,192000u}) for(const auto bits:{16u,24u}) stalled_sender(rate,bits,355,false);
         stalled_sender(48000,24,700,true);
         Source source(48000,24);
         {

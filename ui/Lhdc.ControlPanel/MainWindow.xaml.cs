@@ -21,6 +21,9 @@ public partial class MainWindow : Window {
     private bool audioServiceRunning, profileEditable, modePendingConnection;
     private bool formatEdited;
     private bool deviceAvailable;
+    private bool headphoneConnected;
+    private bool? hiResEnabled;
+    private int mediaMtu;
     private readonly DispatcherTimer statusTimer = new() { Interval = TimeSpan.FromSeconds(3) };
 
     public MainWindow() { InitializeComponent(); }
@@ -76,7 +79,7 @@ public partial class MainWindow : Window {
     private void UpdateBitrates() {
         var rate = rates?.FirstOrDefault(r => r!["sample_rate"]!.GetValue<int>() == sampleRate);
         var allowed = rate?["bitrates"]?.AsArray().Select(b => b!.GetValue<int>()).ToHashSet();
-        var available = QualityBitrates.Where(k => allowed is null ? k == preferredKbps : allowed.Contains(ActualBitrate(k)))
+        var available = QualityBitrates.Where(k => allowed is null ? k == preferredKbps : allowed.Contains(ActualBitrate(k)) && (mediaMtu > 0 || k <= 400))
             .Select(k => new Choice(k, ActualBitrate(k) + " kbps")).ToArray();
         updatingParameters = true;
         try {
@@ -130,6 +133,7 @@ public partial class MainWindow : Window {
         ModeHint.Visibility = lhdc ? Visibility.Collapsed : Visibility.Visible;
         SaveButton.IsEnabled = ready && deviceAvailable && (!lhdc || BitrateBox.SelectedItem is Choice && SampleRateBox.SelectedItem is Choice && BitDepthBox.SelectedItem is Choice);
         RefreshButton.IsEnabled = ready;
+        HiResBox.IsEnabled = ready && headphoneConnected && hiResEnabled.HasValue;
         if (!lhdc) SaveButton.Content = "应用 Windows 驱动";
         else if (service == "lhdc-transport" && audioServiceRunning && profileEditable)
             SaveButton.Content = "应用参数";
@@ -150,6 +154,21 @@ public partial class MainWindow : Window {
             Log(audio.ToJsonString());
         }
         bool connected = connection["connected"]!.GetValue<bool>();
+        bool readHiRes = connected && (writeLog || !headphoneConnected);
+        headphoneConnected = connected;
+        if (!connected) {
+            hiResEnabled = null;
+            HiResBox.IsChecked = null;
+            HiResHint.Text = "连接耳机后读取";
+        }
+        else if (readHiRes) {
+            try { UpdateHiRes(await client.Host("hires")); }
+            catch (Exception error) {
+                hiResEnabled = null;
+                HiResHint.Text = "未能读取耳机状态，请稍后刷新";
+                Log(error.ToString());
+            }
+        }
         bool known = connection["known"]!.GetValue<bool>();
         ConnectionBadge.Text = connected ? "已连接" : known ? "未连接" : "未发现耳机";
         ConnectionBadge.Foreground = connected ? new SolidColorBrush(Color.FromRgb(21,128,61)) : (Brush)FindResource("Muted");
@@ -165,10 +184,12 @@ public partial class MainWindow : Window {
             : service == "lhdc-transport" && audioServiceRunning ? "LHDC V5" : "LHDC V5 · 服务未运行";
 
         var caps = audio["peer_capabilities"]?.GetValue<string>() ?? "";
-        bool formatChanged = caps != peerCaps;
+        int mtu = audio["media_mtu"]?.GetValue<int>() ?? 0;
+        bool formatChanged = caps != peerCaps || mtu != mediaMtu;
+        mediaMtu = mtu;
         if (formatChanged) {
             peerCaps = caps;
-            var options = caps.Length > 0 ? await client.Host("profile-options", caps) : null;
+            var options = caps.Length > 0 ? await client.Host("profile-options", caps, mediaMtu.ToString(CultureInfo.InvariantCulture)) : null;
             rates = options?["rates"]?.AsArray();
             bitDepths = options?["bits"]?.AsArray();
         }
@@ -192,6 +213,47 @@ public partial class MainWindow : Window {
         else FormatText.Text = "连接设备后显示";
         if (formatChanged) { UpdateFormats(); UpdateBitrates(); }
         UpdateControls();
+    }
+
+    private void UpdateHiRes(JsonObject state) {
+        hiResEnabled = state["supported"]?.GetValue<bool>() == true ? state["enabled"]?.GetValue<bool>() : null;
+        HiResBox.IsChecked = hiResEnabled;
+        HiResHint.Text = hiResEnabled == true ? "已开启，格式与码率按耳机实际能力提供。"
+            : hiResEnabled == false ? "开启后可使用更高采样率与码率，切换会短暂中断音频。" : "耳机未报告此功能";
+    }
+
+    private async void HiResClick(object sender, RoutedEventArgs e) {
+        bool desired = HiResBox.IsChecked == true;
+        HiResBox.IsChecked = hiResEnabled == true;
+        await Operate(async () => {
+            var installed = NativeClient.InstalledProfile();
+            if (!desired && installed is not null && (installed.SampleRate > 48000 || installed.Kbps > 400)) {
+                StatusText.Text = "关闭 Hi-Res 前，请先应用不高于 48 kHz / 400 kbps 的 LHDC 参数";
+                return;
+            }
+            JsonObject result;
+            try { result = await client!.Host("hires", desired ? "on" : "off"); }
+            catch {
+                hiResEnabled = null;
+                HiResBox.IsChecked = null;
+                HiResHint.Text = "状态未确认，请刷新后重试";
+                throw;
+            }
+            UpdateHiRes(result);
+            Log(result.ToJsonString());
+            bool capabilitiesPending = false;
+            if (result["changed"]?.GetValue<bool>() == true && audioServiceRunning) {
+                var deadline = DateTime.UtcNow.AddSeconds(12);
+                JsonObject audio;
+                do {
+                    await Task.Delay(250);
+                    audio = await client.Host("audio-status");
+                } while ((audio["peer_capabilities"]?.GetValue<string>() ?? "").Length == 0 && DateTime.UtcNow < deadline);
+                capabilitiesPending = (audio["peer_capabilities"]?.GetValue<string>() ?? "").Length == 0;
+            }
+            await Refresh();
+            StatusText.Text = capabilitiesPending ? "耳机开关已确认，等待 LHDC 能力更新" : desired ? "Hi-Res 已开启" : "Hi-Res 已关闭";
+        }, "正在切换耳机 Hi-Res…");
     }
 
     private async void RefreshClick(object sender, RoutedEventArgs e) => await Operate(async () => {

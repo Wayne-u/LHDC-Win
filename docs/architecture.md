@@ -14,6 +14,8 @@ flowchart LR
     Endpoint --> HFP[Windows 原生 HFP]
     HFP --> Earbuds
     Panel[配置面板] --> Profile[采样率 / 位深 / 码率]
+    Panel --> Control[HeyMelody RFCOMM / Hi-Res]
+    Control --> Earbuds
     Profile --> Encode
 ```
 
@@ -21,13 +23,23 @@ flowchart LR
 
 音频框架由固定版本的 Microsoft SimpleAudioSample 在 `build/audio-reference` 准备单一播放路径，上游依赖保持原样。
 
+## Hi-Res 控制
+
+`src/control/` 独立实现 HeyMelody 控制协议。设备地址复用自动发现，按已知服务 UUID 由 Windows SDP 解析 RFCOMM 通道，不写死通道号。帧处理支持流式拆包、合包和 varint 长度；请求按命令与序号匹配，忽略无关通知，连接及每笔事务均有超时。
+
+Hi-Res 查询为 `0x010D`、payload `01 18`；设置为 `0x0403`、payload `18 01/00`。只有设置响应成功且再次查询值一致才报告切换成功。未知值保留为未知，不能当成关闭。协议来源与归属见 [NOTICE](../NOTICE.md)。
+
+开关改变后清除旧能力缓存并增加能力代次，服务重新建立 AVDTP 会话、读取真实能力；缓存代次不匹配时不向面板提供旧参数。高格式安装还会读回耳机 Hi-Res 状态。关闭前拒绝尚在使用高采样率/码率的配置，避免把当前音乐链路切到不支持的参数。内核 PCM 缓冲按最大 192 kHz / 24 位容纳 200 ms，实际容量仍按所选格式限制。
+
 `LHDC-Win` 是 LocalSystem 自动服务，二进制位于仅管理员可写的 `%ProgramFiles%\LHDC-Win`。它管理活动控制台会话内的无窗口工作进程，以观察桌面应用的 Core Audio 通话状态。工作进程仍以 LocalSystem 运行；停止事件仅允许 SYSTEM/Administrators 访问，Job Object 在服务退出时回收进程，会话变化时重新建立。
 
 ## 格式与原生端点
 
 `HKLM\SOFTWARE\LHDC-Win\Profile` 是严格校验的 12 字节 REG_BINARY，保存采样率、位深、码率。驱动只公布选定的一种立体声整数 PCM 格式；DEFAULT/RAW 首选格式、MODEDATAFORMATS 支持列表和数据范围一致。JACK_DESCRIPTION3 配置标识随采样率和位深改变，以刷新系统缓存。
 
-当前耳机实际 SDP 为 `0100070d00ff3a050000354c3016114000`，支持 44.1/48 kHz、16/24 位、最高 400 kbps。24 位使用三字节 PCM，服务核验真实输入与耳机能力，不增加音乐重采样。
+Hi-Res 关闭时耳机的 AVDTP 能力为 `0100070d00ff3a050000354c3016114000`，开启后为 `0100070d00ff3a050000354c3506114000`，分别声明最高 48 kHz / 400 kbps 与 192 kHz / 1000 kbps。24 位使用三字节 PCM，服务核验真实输入与耳机能力，不增加音乐重采样。
+
+码率还受单帧载荷预算限制：当前协商媒体 MTU 为 672 字节，减去 RTP/LHDC 头后为 658 字节。44.1 kHz / 1000 kbps 的编码帧需 682 字节，因此面板按实际 MTU 排除该组合，编码器在初始化前拒绝超限；没有实现帧分片。其他被允许的参数也不等于无线链路长期稳定。
 
 格式切换先停止工作进程，再只重启目标音频子设备，在 20 秒窗口内核验真实适配器、格式和客户端连续可用 2 秒，之后启动服务。持续失败恢复 Windows 原生驱动；未连接时记录待验证状态。仅修改码率不重绑驱动。
 

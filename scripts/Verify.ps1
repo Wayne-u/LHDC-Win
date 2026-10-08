@@ -94,8 +94,9 @@ function Read-Records([string]$Path,[uint32]$Mtu) {
     $parsed=Read-Records $encoded 660
     if ($parsed.Records -ne 12000 -or $parsed.Frames -ne 12000 -or $stats.pending_frames_at_eof -ne 0) { throw '60s encoder frame totals differ' }
     if ($stats.encode_us.p99 -ge 2000) { throw 'Encoding exceeds the development p99 target of 2ms' }
-    $caps='0100070d00ff3a050000354c3016114000'
-    $options=Invoke-HostJson @('profile-options',$caps)
+    # Captured Enco X4 capabilities with Hi-Res enabled; this remains an offline test.
+    $caps='0100070d00ff3a050000354c3506114000'
+    $options=Invoke-HostJson @('profile-options',$caps,'672')
     $resultsMedia=[Collections.Generic.List[object]]::new()
     foreach ($rate in $options.rates) {
         foreach ($bits in $options.bits) {

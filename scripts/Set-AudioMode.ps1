@@ -1,6 +1,6 @@
 param(
     [ValidateSet('LHDC','Windows')][string]$Mode='LHDC',
-    [ValidateSet(44100,48000)][int]$SampleRate=48000,
+    [ValidateSet(44100,48000,96000,192000)][int]$SampleRate=48000,
     [ValidateSet(16,24)][int]$Bits=24,
     [int]$Kbps=400,
     [string]$ResultFile
@@ -125,6 +125,10 @@ try {
     if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Audio mode installation requires an administrator process.' }
     $result.Before=Invoke-Native $deviceTool @('snapshot',$target) 'before'
     if ($result.Before.service -notin @('BthA2dp','lhdc-transport')) { throw 'The target has an unrelated audio driver.' }
+    if ($Mode -eq 'LHDC' -and ($SampleRate -gt 48000 -or $Kbps -gt 400)) {
+        $hires=Invoke-Native $hostTool @('hires') 'hires-state'
+        if (-not $hires.supported -or $hires.enabled -ne $true) { throw 'Enable and verify earbud Hi-Res before selecting a high-rate LHDC profile.' }
+    }
     if ($Mode -eq 'Windows') {
         $bound=$result.Before.service -eq 'lhdc-transport'
         Stop-LhdcService

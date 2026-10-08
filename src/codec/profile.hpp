@@ -9,5 +9,6 @@ struct Profile {
 };
 std::vector<std::uint32_t> bitrates(std::uint32_t sample_rate);
 std::uint32_t quality_index(const Profile& profile);
+std::uint32_t encoded_frame_bytes(const Profile& profile);
 Profile follow_pcm(const Profile& quality,unsigned sample_rate,unsigned bits,bool floating_point);
 }

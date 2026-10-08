@@ -22,4 +22,11 @@ Profile follow_pcm(const Profile& quality,unsigned sample_rate,unsigned bits,boo
     quality_index(result);
     return result;
 }
+std::uint32_t encoded_frame_bytes(const Profile& profile) {
+    quality_index(profile);
+    // Pinned encoder: two channel payloads plus the two-byte frame header.
+    // 44.1 kHz still uses 240 samples per block, so its frame is longer than 5 ms.
+    const auto denominator=profile.sample_rate==44100?147000u:160000u;
+    return 2+2*(profile.kbps*1000u*50u/denominator);
+}
 }

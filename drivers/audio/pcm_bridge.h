@@ -9,7 +9,8 @@ public:
     void Push(const BYTE* data,ULONG bytes);
     NTSTATUS Property(PPCPROPERTY_REQUEST request);
 private:
-    static constexpr ULONG capacity=96000;
+    // Retain 200 ms of stereo PCM even at 192 kHz / 24 bit.
+    static constexpr ULONG capacity=192000*2*3/5;
     KSPIN_LOCK lock_{};
     LHDC_PCM_STATE state_{};
     ULONG read_{},used_{},limit_{};

@@ -17,3 +17,11 @@ support. The upstream submodules themselves are unchanged.
 
 Product names identify tested devices and upstream sources; this project is
 not affiliated with Microsoft, OPPO or the LHDC trademark owners.
+
+The HeyMelody wire protocol facts (service UUIDs, frame layout, command IDs and
+Hi-Res feature ID `0x18`) were researched using
+[OppoPodsWindows](https://github.com/3295074384/OppoPodsWindows) and the
+[upstream protocol notes](https://github.com/Leaf-lsgtky/OppoPods/blob/master/docs/HeyMelody_Official_App_Protocol_Findings.md),
+then verified against an Enco X4. Those projects retain GPL-3.0; their source
+code and device model databases are not included here. `src/control/` is an
+independent implementation of the observed wire protocol under this project's MIT license.

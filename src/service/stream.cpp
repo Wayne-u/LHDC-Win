@@ -11,6 +11,7 @@
 #include "host/json.hpp"
 #include "media/packetizer.hpp"
 #include "transport/windows.hpp"
+#include "control/rfcomm.hpp"
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -34,19 +35,25 @@ bool stopped(HANDLE stop) {
 void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,const HfpActivity& hfp) {
     AudioTask priority; Pacer pacer;
     const auto quality=profile;
+    const auto revision=capability_revision();
     MediaSession session(target_device().address,profile); session.discover();
     const auto& caps=session.peer_capabilities();
     const auto saved=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilities",REG_BINARY,caps.data(),static_cast<DWORD>(caps.size()));
     if (saved!=ERROR_SUCCESS) throw std::runtime_error("Peer capability cache write failed, Win32="+std::to_string(saved));
+    const auto saved_revision=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilityRevision",REG_DWORD,&revision,sizeof(revision));
+    if(saved_revision!=ERROR_SUCCESS) throw WindowsError("Peer capability revision write",saved_revision);
     LHDC_PCM_STATE state{};
     // Format probes can overwrite idle PCM metadata. Prepare using the last
     // running format, then verify against the actual stream before sending.
     profile=follow_pcm(quality,last_format.sample_rate,last_format.bits,false);
     session.configure(profile);
+    const auto media_mtu=session.media_info().OutMtu;
+    const auto saved_mtu=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerMediaMtu",REG_DWORD,&media_mtu,sizeof(media_mtu));
+    if(saved_mtu!=ERROR_SUCCESS) throw WindowsError("Media MTU cache write",saved_mtu);
     auto next_hfp_check=std::chrono::steady_clock::now();
     while (!stopped(stop)) {
         session.check();
-        if (!same(quality,service_profile())) return;
+        if (!same(quality,service_profile()) || revision!=capability_revision()) return;
         state=pcm.state();
         if (state.Running) {
             last_format=follow_pcm(quality,state.SampleRate,state.Bits,state.FloatingPoint!=0);
@@ -151,7 +158,7 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
         frames+=packet.frames; ++packets; bytes+=sdu.size();
         if (std::chrono::steady_clock::now()-report>=std::chrono::seconds(1)) {
             const auto report_started=std::chrono::steady_clock::now();
-            if (!same(quality,service_profile())) break;
+            if (!same(quality,service_profile()) || revision!=capability_revision()) break;
             max_profile_us=std::max(max_profile_us,elapsed_us(report_started));
             const auto state_started=std::chrono::steady_clock::now();
             const auto capture=reader.stats();

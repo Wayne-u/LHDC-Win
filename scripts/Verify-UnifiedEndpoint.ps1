@@ -1,4 +1,4 @@
-param([string]$ResultFile)
+param([ValidateSet(44100,48000,96000,192000)][int[]]$SampleRates=@(44100,48000),[string]$ResultFile)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
@@ -19,7 +19,7 @@ function Native([string[]]$Arguments) {
     $text[-1]|ConvertFrom-Json
 }
 try {
-    foreach($rate in @(44100,48000)) { foreach($bits in @(16,24)) {
+    foreach($rate in $SampleRates) { foreach($bits in @(16,24)) {
         $name="$rate-$bits"
         & (Join-Path $PSScriptRoot 'Set-AudioMode.ps1') -Mode LHDC -SampleRate $rate -Bits $bits -Kbps $originalKbps -ResultFile (Join-Path $dir ("install-$name.json"))
         Stop-Service -Name 'LHDC-Win'
