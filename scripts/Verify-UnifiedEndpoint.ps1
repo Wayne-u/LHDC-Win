@@ -18,6 +18,7 @@ function Native([string[]]$Arguments) {
     if($LASTEXITCODE) { throw "Backend failed: $($Arguments[0])." }
     $text[-1]|ConvertFrom-Json
 }
+$originalAdaptive=(Native @('audio-status')).adaptive_bitrate
 try {
     foreach($rate in $SampleRates) { foreach($bits in @(16,24)) {
         $name="$rate-$bits"
@@ -62,7 +63,7 @@ try {
 finally {
     if($null -ne $render -and -not $render.HasExited) { $render.Kill();$render.WaitForExit() }
     try {
-        & (Join-Path $PSScriptRoot 'Set-AudioMode.ps1') -Mode LHDC -SampleRate $originalRate -Bits $originalBits -Kbps $originalKbps -ResultFile (Join-Path $dir 'restore.json')
+        & (Join-Path $PSScriptRoot 'Set-AudioMode.ps1') -Mode LHDC -SampleRate $originalRate -Bits $originalBits -Kbps $originalKbps -AdaptiveBitrate:$originalAdaptive -ResultFile (Join-Path $dir 'restore.json')
     } catch { $result.RestoreError=$_.Exception.Message }
     $result.FinishedAt=Get-Date -Format o
     $json=$result|ConvertTo-Json -Depth 8

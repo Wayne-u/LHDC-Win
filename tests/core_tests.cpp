@@ -1,6 +1,7 @@
 #include "avdtp/protocol.hpp"
 #include "avdtp/lhdc_v5.hpp"
 #include "codec/encoder.hpp"
+#include "codec/bitrate_control.hpp"
 #include "audio/wav.hpp"
 #include "media/packetizer.hpp"
 #include "avdtp/stream.hpp"
@@ -21,6 +22,39 @@ template<class F> static void rejects(F function,const char* message) {
 }
 int main() {
     try {
+        lhdc::BitrateControl fixed({48000,24,1000},false);
+        require(fixed.observe(1000,300,10000,500)==1000,"Fixed bitrate never drops automatically");
+        lhdc::BitrateControl adaptive({48000,24,1000},true);
+        require(adaptive.bitrate()==500,"Adaptive bitrate starts at a conservative supported level");
+        require(adaptive.observe(100,130,0,0)==500 && adaptive.observe(200,60,0,0)==500,"Transient backlog does not lower bitrate");
+        require(adaptive.observe(15200,60,0,0)==900 && adaptive.observe(30200,60,0,0)==1000,"Stable playback gradually approaches the ceiling");
+        require(adaptive.observe(30300,130,0,0)==1000 && adaptive.observe(30400,130,0,0)==1000,"Backlog requires sustained pressure");
+        require(adaptive.observe(30500,130,0,0)==900,"Sustained backlog lowers one level");
+        require(adaptive.observe(30600,60,32,0)==500,"New PCM loss immediately lowers bitrate");
+        require(adaptive.observe(30700,60,32,0)==500,"Existing loss is not counted twice");
+        require(adaptive.observe(30800,190,32,0)==400,"Severe backlog lowers before overflow");
+        require(adaptive.observe(30900,190,32,0)==400,"Adaptive floor remains in the negotiated range");
+        require(adaptive.observe(50000,60,32,0)==400 && adaptive.observe(60900,60,32,0)==500,"Recovery waits thirty seconds after congestion");
+        require(adaptive.observe(75900,60,32,0)==900 && adaptive.observe(90900,60,32,0)==1000 && adaptive.observe(105900,60,32,0)==1000,"Recovery respects ladder and ceiling");
+        lhdc::BitrateControl sends({48000,24,1000},true);
+        require(sends.observe(15000,60,0,0)==900 && sends.observe(30000,60,0,0)==1000,"Prepare a high bitrate for send-pressure regression");
+        require(sends.observe(30100,60,0,200)==1000,"A delayed send without PCM backlog does not prove congestion");
+        require(sends.observe(30200,100,0,45)==1000 && sends.observe(30300,100,0,45)==1000,"Short send pressure does not lower bitrate");
+        require(sends.observe(30400,100,0,45)==900,"Sustained send pressure acts before the PCM-only threshold");
+        require(sends.observe(30450,100,0,150)==900 && sends.observe(30500,100,0,0)==500,"Retain a severe send delay between observation intervals");
+        require(sends.observe(30600,100,0,150)==400,"Persistent severe congestion reaches the negotiated floor");
+        lhdc::BitrateControl severe({48000,24,1000},true);
+        severe.observe(15000,60,0,0);severe.observe(30000,60,0,0);
+        require(severe.observe(30100,190,0,0)==500,"Severe PCM backlog skips the ineffective 1000-to-900 step");
+        lhdc::BitrateControl loss({48000,24,1000},true);
+        loss.observe(15000,60,0,0);loss.observe(30000,60,0,0);
+        require(loss.observe(30100,60,1,0)==500,"New PCM loss at 1000 kbps skips directly to 500");
+        require(loss.observe(60000,60,1,0)==500 && loss.observe(60100,60,1,0)==900,"Cross-stage drops preserve the thirty-second recovery delay");
+        lhdc::BitrateControl fractional({44100,24,900},true);
+        require(fractional.bitrate()==480 && fractional.observe(15000,60,0,0)==900,"44.1 kHz uses the actual encoder bitrate ladder");
+        require(fractional.observe(15100,190,0,0)==480,"Severe congestion uses 480 rather than inventing 500 at 44.1 kHz");
+        lhdc::BitrateControl low({48000,24,320},true);
+        require(low.observe(1000,300,20,500)==320,"Low ceilings do not invent unsupported adaptive levels");
         require(lhdc::encoded_frame_bytes({44100,24,1000})==682,"44.1 kHz 1000 kbps needs a larger MTU");
         require(lhdc::encoded_frame_bytes({48000,24,1000})==626,"48 kHz 1000 kbps frame size");
         rejects([]{lhdc::Encoder encoder({44100,24,1000},658);},"Reject oversized frames before encoding");
@@ -82,7 +116,7 @@ int main() {
         const auto tlvs=av::capabilities(caps);
         const auto vendor=av::vendor_codec(tlvs[1]);
         require(tlvs.size()==2 && vendor && vendor->vendor_id==0x53a && vendor->codec_id==0x4c35 && vendor->data.size()==5,"Vendor codec endianness");
-        require(av::select_48k_s16_400(caps)==caps,"LHDC intersection");
+        require(av::select_configuration(caps,{})==caps,"LHDC intersection");
         // Enco X4 capture: 2026-10-04, transport-20261004-214048-850-Test.
         av::Reassembler captured;
         const auto discovered=captured.consume(av::unhex("0201040808080c08"));
@@ -91,7 +125,7 @@ int main() {
         require(actual_seps.size()==3 && actual_seps[2].seid==3 && actual_seps[2].sink && !actual_seps[2].in_use,"Captured LHDC sink SEP");
         const auto actual_caps=captured.consume(av::unhex("32020100070d00ff3a050000354c3016114000"));
         require(actual_caps.has_value(),"Captured GetCapabilities response");
-        require(av::select_48k_s16_400(actual_caps->payload)==caps,"Captured peer accepts fixed format intersection");
+        require(av::select_configuration(actual_caps->payload,{})==caps,"Captured peer accepts fixed format intersection");
         const auto peer=av::v5_capabilities(actual_caps->payload);
         require(peer.sample_rates==std::vector<std::uint32_t>{44100,48000} && peer.bit_depths==std::vector<std::uint32_t>{16,24},"Captured rate and depth masks");
         require(peer.min_kbps==64 && peer.max_kbps==400,"Captured bitrate bounds");
@@ -152,13 +186,13 @@ int main() {
         const auto readback=captured.consume(av::unhex("52040100070d00ff3a050000354c10d4110000"));
         require(readback && readback->payload==caps,"Captured configuration readback");
         auto incompatible=caps; incompatible[12]=0x04;
-        rejects([&]{av::select_48k_s16_400(incompatible);},"Peer missing 48k");
+        rejects([&]{av::select_configuration(incompatible,{});},"Peer missing 48k");
         incompatible=caps; incompatible[13]=0xd2;
-        rejects([&]{av::select_48k_s16_400(incompatible);},"Peer missing S16");
+        rejects([&]{av::select_configuration(incompatible,{});},"Peer missing S16");
         incompatible=caps; incompatible[14]=0x10;
-        rejects([&]{av::select_48k_s16_400(incompatible);},"Peer missing version1");
+        rejects([&]{av::select_configuration(incompatible,{});},"Peer missing version1");
         incompatible=caps; incompatible.insert(incompatible.end(),{4,2,2,0});
-        rejects([&]{av::select_48k_s16_400(incompatible);},"Unsupported protection");
+        rejects([&]{av::select_configuration(incompatible,{});},"Unsupported protection");
         rejects([]{av::capabilities(av::Bytes{7,13,0});},"Truncated TLV");
         rejects([]{av::vendor_codec(av::Capability{7,{0,255}});},"Truncated vendor ID");
         rejects([]{av::unhex("012");},"Odd hex input");
@@ -182,6 +216,32 @@ int main() {
             else {++packets;frames+=a.frames;}
         }
         require(frames==100 && packets==50 && empty==50,"Buffered encoder output boundaries");
+        lhdc::Encoder live({48000,24,1000},665);
+        lhdc::Packetizer live_media(679,live.block_samples());
+        av::Bytes live_pcm(live.block_bytes(),0x35);
+        unsigned live_frames=0,live_packets=0;
+        for (const auto kbps:{1000u,500u,900u,1000u,400u}) {
+            live.set_bitrate(kbps);
+            require(live.bitrate()==kbps,"Live encoder accepts the requested bitrate");
+            unsigned supplied=0,emitted=0;
+            while (supplied<40 || supplied!=emitted) {
+                const auto packet=live.encode(live_pcm); ++supplied;
+                emitted+=packet.frames;
+                const auto sdu=live_media.pack(packet);
+                if (sdu.empty()) {
+                    rejects([&]{live.set_bitrate(900);},"Reject bitrate changes with buffered frames");
+                    continue;
+                }
+                const auto sequence=(sdu[2]<<8)|sdu[3];
+                const auto timestamp=(std::uint32_t(sdu[4])<<24)|(std::uint32_t(sdu[5])<<16)|(sdu[6]<<8)|sdu[7];
+                require(sequence==live_packets++,"Live bitrate changes preserve RTP sequence");
+                require(timestamp==live_frames*live.block_samples(),"Live bitrate changes preserve RTP time");
+                live_frames+=packet.frames;
+            }
+            require(supplied==emitted,"Live bitrate change neither loses nor duplicates frames");
+        }
+        lhdc::Encoder limited({44100,24,400},665);
+        rejects([&]{limited.set_bitrate(1000);},"Live bitrate changes enforce the media MTU");
         const auto path=std::filesystem::current_path()/"core-test-tone.wav";
         lhdc::write_test_wav(path,1);
         const auto wav=lhdc::read_wav(path);

@@ -140,9 +140,12 @@ static int run(int argc,char** argv) {
         if (argc<2) throw std::invalid_argument("Usage: lhdc-host target | hires [on|off] | inspect | connection ADDRESS | audio-status | hfp-status | call-probe SECONDS | audio-devices | audio-inputs | direct-pcm | direct-formats | direct-capture SECONDS FILE | render-wav ENDPOINT WAV [REPEATS] | make-test-wav FILE [SECONDS [RATE BITS]] | encode WAV RECORDS [PAYLOAD_MTU [KBPS]] | packetize WAV RECORDS OUT_MTU KBPS | profile-check RATE BITS KBPS | profile-options HEX | configure HEX RATE BITS KBPS | decode-caps HEX");
         const std::string command=argv[1];
         if (command=="make-test-wav" && (argc==3 || argc==4 || argc==6 || argc==7)) {
-            if (argc==7 && std::string(argv[6])!="--loop") throw std::invalid_argument("Expected --loop after the tone format");
-            lhdc::write_test_wav(file_path(argv[2]),argc>=4?number(argv[3]):2,argc>=6?number(argv[4]):48000,argc>=6?number(argv[5]):16,argc==7);
-            std::cout << "{\"event\":\"wav_created\",\"peak_dbfs\":-30,\"left_hz\":440,\"right_hz\":880}\n";
+            const std::string option=argc==7?argv[6]:"";
+            if (!option.empty() && option!="--loop" && option!="--silent") throw std::invalid_argument("Expected --loop or --silent after the tone format");
+            const bool silent=option=="--silent";
+            lhdc::write_test_wav(file_path(argv[2]),argc>=4?number(argv[3]):2,argc>=6?number(argv[4]):48000,argc>=6?number(argv[5]):16,option=="--loop",silent);
+            if (silent) std::cout << "{\"event\":\"wav_created\",\"silent\":true}\n";
+            else std::cout << "{\"event\":\"wav_created\",\"peak_dbfs\":-30,\"left_hz\":440,\"right_hz\":880}\n";
         } else if (command=="encode" && argc>=4 && argc<=6) encode_wav(argv[2],argv[3],argc>=5?number(argv[4]):660,argc==6?number(argv[5]):400);
         else if (command=="packetize" && argc==6) encode_wav(argv[2],argv[3],number(argv[4]),number(argv[5]),true);
         else if (command=="profile-options" && (argc==3 || argc==4)) profile_options(av::unhex(argv[2]),argc==4?number(argv[3]):0);

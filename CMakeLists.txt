@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
-set(LHDCV5_BUILD_TESTS ON CACHE BOOL "Build upstream reference encoder")
+set(LHDCV5_BUILD_TESTS "${BUILD_TESTING}")
 add_subdirectory(third_party/lhdcv5)
 add_library(lhdc_core
     src/control/hey_melody.cpp
@@ -13,6 +13,7 @@ add_library(lhdc_core
     src/avdtp/lhdc_v5.cpp
     src/avdtp/stream.cpp
     src/codec/encoder.cpp
+    src/codec/bitrate_control.cpp
     src/codec/profile.cpp
     src/media/packetizer.cpp
     src/audio/wav.cpp
@@ -32,16 +33,13 @@ if(WIN32)
     target_sources(lhdc-host PRIVATE src/audio/wasapi.cpp)
     target_link_libraries(lhdc-host PRIVATE lhdc_windows)
     add_executable(lhdc-service src/service/main.cpp src/service/stream.cpp src/service/worker.cpp)
-    target_link_libraries(lhdc-service PRIVATE lhdc_windows advapi32)
-    target_compile_definitions(lhdc-host PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(lhdc-service PRIVATE lhdc_windows)
     add_executable(lhdc-device installer/device_tool.cpp installer/signature.cpp)
     target_include_directories(lhdc-device PRIVATE src)
-    target_compile_definitions(lhdc-device PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(lhdc-device PRIVATE lhdc_windows setupapi cfgmgr32 newdev ntdll advapi32 crypt32 wintrust)
+    target_link_libraries(lhdc-device PRIVATE lhdc_windows newdev ntdll crypt32 wintrust)
     add_executable(lhdc-audio-device installer/audio_device.cpp installer/signature.cpp)
     target_include_directories(lhdc-audio-device PRIVATE src include)
-    target_compile_definitions(lhdc-audio-device PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(lhdc-audio-device PRIVATE lhdc_windows setupapi cfgmgr32 newdev advapi32 crypt32 wintrust)
+    target_link_libraries(lhdc-audio-device PRIVATE lhdc_windows newdev crypt32 wintrust)
     if(MSVC)
         target_compile_options(lhdc_windows PRIVATE /W4 /WX /utf-8)
         target_compile_options(lhdc-service PRIVATE /W4 /WX /utf-8)

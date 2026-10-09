@@ -2,6 +2,8 @@
 
 面向 Windows 11 x64、OPPO Enco X4 和本机 Realtek 蓝牙控制器的开发版本。
 
+当前已知问题：2026-10-09 播放时发生 `lhdc-audio.sys` 内核崩溃（`0xD1`）。生命周期修复已安装，静态分析及一分钟听音复测通过；首轮曾发生连接中断，长期稳定性仍未验证。具体证据与边界见 [验证状态](docs/status.md)。
+
 Windows 应用通过耳机的原生统一播放端点输出，后台服务将 WaveRT PCM 编码为 LHDC V5 并发送。面板选择驱动、采样率、位深和码率；Windows 管理播放、音量和通话路由。关闭面板不影响播放。
 
 面板可读取和切换耳机 Hi-Res。实测关闭时耳机声明 44.1/48 kHz、最高 400 kbps；开启后声明 44.1/48/96/192 kHz、最高 1000 kbps，均支持 16/24 位。选项仍取决于当前耳机实际能力，开启不会自动把播放参数调到最高。
@@ -24,24 +26,28 @@ Set-Location LHDC-Win
 ```powershell
 git submodule update --init
 pwsh -NoProfile -File .\scripts\Build.ps1
-pwsh -NoProfile -File .\scripts\Build.ps1 -Driver -Analyze
-pwsh -NoProfile -File .\scripts\Build-AudioDriver.ps1 -Analyze
+pwsh -NoProfile -File .\scripts\Build.ps1 -Target Transport -Analyze
+pwsh -NoProfile -File .\scripts\Build.ps1 -Target Audio -Analyze
 pwsh -NoProfile -File .\scripts\Sign-TestPackage.ps1
 pwsh -NoProfile -File .\scripts\Sign-TestPackage.ps1 -Audio
-pwsh -NoProfile -File .\scripts\Build-UI.ps1
+pwsh -NoProfile -File .\scripts\Build.ps1 -Target UI
 ```
 
-`Build.ps1` 构建后端、服务和部署工具，并运行七项 CTest。驱动单独使用 WDK 构建、InfVerif 和静态分析，签名脚本校验 SYS/CAT 签名及目录成员摘要。产物位于 `build/`。
+`Build.ps1` 构建后端、服务和部署工具，并运行八项 CTest。驱动单独使用 WDK 构建、InfVerif 和静态分析，签名脚本校验 SYS/CAT 签名及目录成员摘要。产物位于 `build/`。
+
+CMake 的 `BUILD_TESTING=OFF` 同时关闭项目测试和上游编码参考程序，正式构建不生成测试可执行文件。
 
 测试证书信任和内核 TESTSIGNING 分别检查。启动配置只通过 `Set-TestSigning.ps1 -Action Enable/Disable` 显式修改，之后手动重启。
 
 ## 使用
 
 ```powershell
-pwsh -NoProfile -File .\scripts\Start-UI.ps1
+pwsh -NoProfile -File .\scripts\Build.ps1 -Target UI -Run
 ```
 
 在面板选择 LHDC V5 或 Windows 标准音频并应用。安装、恢复及采样格式切换需要管理员权限；仅修改码率无需管理员权限。格式变更会短暂中断播放，Windows 声音设置继续管理音量。
+
+固定模式保持所选码率；在当前 AVDTP 协商范围内切换时直接更新编码器，保持连接和 RTP 连续，超出范围仍需重新协商。可选的“自适应码率”默认关闭：所选码率作为上限，拥塞时降档，稳定后逐步恢复，采样率和位深保持不变。面板显示实际播放码率；当前自适应下限为 400 kbps，选择不高于 400 kbps 时保持所选值。
 
 管理员命令行入口与面板相同：
 

@@ -168,6 +168,20 @@ static NTSTATUS SendBrbSync(DEVICE_CONTEXT* ctx, PBRB brb, ULONG size)
     return WdfIoTargetSendInternalIoctlOthersSynchronously(ctx->Target, NULL,
         IOCTL_INTERNAL_BTH_SUBMIT_BRB, &descriptor, NULL, NULL, &options, NULL);
 }
+static VOID TraceAclMode(CHANNEL_CONTEXT* slot)
+{
+    DEVICE_CONTEXT* ctx = slot->DeviceContext;
+    struct _BRB_ACL_GET_MODE brb;
+    NTSTATUS status;
+    if (!WPP_LEVEL_FLAGS_ENABLED(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT)) return;
+    RtlZeroMemory(&brb, sizeof(brb));
+    ctx->Profile.BthInitializeBrb((PBRB)&brb, BRB_ACL_GET_MODE);
+    brb.BtAddress = slot->Info.RemoteAddress;
+    brb.AclMode = ACL_DISCONNECTED;
+    status = SendBrbSync(ctx, (PBRB)&brb, sizeof(brb));
+    TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT,
+        "MEDIA ACL mode=%u status=%!STATUS! bt=0x%08x", brb.AclMode, status, brb.Hdr.Status);
+}
 static NTSTATUS CloseChannel(CHANNEL_CONTEXT* slot, L2CAP_CHANNEL_HANDLE expected)
 {
     DEVICE_CONTEXT* ctx = slot->DeviceContext;
@@ -338,10 +352,16 @@ NTSTATUS DeviceAdd(WDFDRIVER driver, PWDFDEVICE_INIT init)
     status = WdfIoQueueCreate(device, &queue, WDF_NO_OBJECT_ATTRIBUTES, &ctx->Queue);
     if (!NT_SUCCESS(status)) return status;
     for (i = 0; i < LHDC_CHANNEL_COUNT; ++i) {
-        WDF_IO_QUEUE_CONFIG_INIT(&queue, WdfIoQueueDispatchSequential);
+        const BOOLEAN media = i == LHDC_CHANNEL_MEDIA - 1;
+        WDF_IO_QUEUE_CONFIG_INIT(&queue, media ? WdfIoQueueDispatchParallel : WdfIoQueueDispatchSequential);
+        if (media) queue.Settings.Parallel.NumberOfPresentedRequests = LHDC_MEDIA_SEND_WINDOW;
         queue.EvtIoDeviceControl = IoControl;
         queue.EvtIoStop = IoStop;
-        status = WdfIoQueueCreate(device, &queue, WDF_NO_OBJECT_ATTRIBUTES, &ctx->Channels[i].Queue);
+        WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
+        // Serialize submission callbacks while allowing bounded BRBs to complete
+        // asynchronously. Signaling and AVRCP remain sequential.
+        attributes.SynchronizationScope = media ? WdfSynchronizationScopeQueue : WdfSynchronizationScopeNone;
+        status = WdfIoQueueCreate(device, &queue, &attributes, &ctx->Channels[i].Queue);
         if (!NT_SUCCESS(status)) return status;
     }
     status = WdfDeviceCreateDeviceInterface(device, &GUID_DEVINTERFACE_LHDC_TRANSPORT, NULL);
@@ -471,6 +491,7 @@ VOID BrbComplete(WDFREQUEST request, WDFIOTARGET target,
     REQUEST_CONTEXT* req = GetRequestContext(request);
     NTSTATUS status = params->IoStatus.Status;
     ULONG_PTR information = 0;
+    ULONG pending;
     BOOLEAN remoteGone = FALSE;
     UNREFERENCED_PARAMETER(target);
     WdfSpinLockAcquire(ctx->Lock);
@@ -505,7 +526,12 @@ VOID BrbComplete(WDFREQUEST request, WDFIOTARGET target,
         }
     }
     slot->Info.LastNtStatus = status;
+    pending = slot->Info.PendingRequests;
     WdfSpinLockRelease(ctx->Lock);
+    if (slot->Info.ChannelId == LHDC_CHANNEL_MEDIA && req->Ioctl == IOCTL_LHDC_SEND)
+        TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT,
+            "MEDIA TX complete request=%p bytes=%u pending=%u status=%!STATUS!",
+            request, req->TxBytes, pending, status);
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT,
         "BRB channel=%u ioctl=0x%08x status=%!STATUS! bt=0x%08x", slot->Info.ChannelId, req->Ioctl, status, req->Brb.BrbHeader.Status);
     if (remoteGone) WdfWorkItemEnqueue(ctx->DisconnectWork);
@@ -554,6 +580,7 @@ VOID IoControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t inLe
     WDF_REQUEST_SEND_OPTIONS options;
     NTSTATUS status;
     ULONG brbSize = 0;
+    ULONG pending;
     BOOLEAN available;
     WdfSpinLockAcquire(ctx->Lock);
     available = ctx->Ready && !ctx->SessionClosing;
@@ -568,14 +595,16 @@ VOID IoControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t inLe
         status = WdfRequestRetrieveOutputBuffer(request, sizeof(*info), (PVOID*)&info, NULL);
         if (!NT_SUCCESS(status)) goto fail;
         WdfSpinLockAcquire(ctx->Lock); *info = slot->Info; WdfSpinLockRelease(ctx->Lock);
+        if (info->ChannelId == LHDC_CHANNEL_MEDIA && info->Connected) TraceAclMode(slot);
         WdfRequestCompleteWithInformation(request, STATUS_SUCCESS, sizeof(*info));
         return;
     }
     if (code == IOCTL_LHDC_CLOSE) {
         if (inLength != sizeof(LHDC_CHANNEL_INPUT)) { status = STATUS_INVALID_PARAMETER; goto fail; }
         WdfSpinLockAcquire(ctx->Lock);
-        available = slot->Info.ChannelId != LHDC_CHANNEL_SIGNAL ||
-            (ctx->Channels[LHDC_CHANNEL_MEDIA - 1].Handle == NULL && !ctx->Channels[LHDC_CHANNEL_MEDIA - 1].Opening);
+        available = slot->Info.PendingRequests == 0 && !slot->Opening &&
+            (slot->Info.ChannelId != LHDC_CHANNEL_SIGNAL ||
+            (ctx->Channels[LHDC_CHANNEL_MEDIA - 1].Handle == NULL && !ctx->Channels[LHDC_CHANNEL_MEDIA - 1].Opening));
         WdfSpinLockRelease(ctx->Lock);
         if (!available) { status = STATUS_DEVICE_BUSY; goto fail; }
         status = CloseChannel(slot, NULL);
@@ -587,14 +616,14 @@ VOID IoControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t inLe
         struct _BRB_L2CA_OPEN_CHANNEL* open = &req->Brb.BrbL2caOpenChannel;
         if (inLength != sizeof(*input) || input->ExpectedRemoteAddress != slot->Info.RemoteAddress) { status = STATUS_INVALID_PARAMETER; goto fail; }
         WdfSpinLockAcquire(ctx->Lock);
-        available = slot->Handle == NULL &&
+        available = slot->Handle == NULL && !slot->Opening && slot->Info.PendingRequests == 0 &&
             (slot->Info.ChannelId != LHDC_CHANNEL_MEDIA || ctx->Channels[LHDC_CHANNEL_SIGNAL - 1].Info.Connected);
         WdfSpinLockRelease(ctx->Lock);
         if (!available) { status = STATUS_DEVICE_BUSY; goto fail; }
         if (slot->Info.ChannelId != LHDC_CHANNEL_MEDIA) {
             status = VerifySdpPsm(ctx, slot->Info.ChannelId == LHDC_CHANNEL_AVRCP ? LHDC_AVCTP_PSM : LHDC_AVDTP_PSM);
             if (!NT_SUCCESS(status)) goto fail;
-        }
+        } else TraceAclMode(slot);
         WdfSpinLockAcquire(ctx->Lock);
         available = ctx->Ready && !ctx->SessionClosing;
         if (available) {
@@ -609,7 +638,9 @@ VOID IoControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t inLe
         open->ChannelFlags = CF_ROLE_EITHER | CF_LINK_AUTHENTICATED;
         open->ConfigOut.Flags = CFG_MTU;
         open->ConfigOut.Mtu.Min = L2CAP_MIN_MTU;
-        open->ConfigOut.Mtu.Preferred = L2CAP_DEFAULT_MTU;
+        // Allow the media encoder to group frames within its 20 ms interval.
+        // Keep signaling/control at the default and honor the negotiated result.
+        open->ConfigOut.Mtu.Preferred = slot->Info.ChannelId == LHDC_CHANNEL_MEDIA ? LHDC_MAX_SDU : L2CAP_DEFAULT_MTU;
         open->ConfigOut.Mtu.Max = LHDC_MAX_SDU;
         open->ConfigIn.Flags = CFG_MTU;
         open->ConfigIn.Mtu = open->ConfigOut.Mtu;
@@ -664,7 +695,11 @@ VOID IoControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t inLe
     WdfSpinLockAcquire(ctx->Lock);
     ++slot->Info.PendingRequests;
     slot->Info.SubmittedBytes += req->TxBytes;
+    pending = slot->Info.PendingRequests;
     WdfSpinLockRelease(ctx->Lock);
+    if (slot->Info.ChannelId == LHDC_CHANNEL_MEDIA && code == IOCTL_LHDC_SEND)
+        TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT,
+            "MEDIA TX submit request=%p bytes=%u pending=%u", request, req->TxBytes, pending);
     if (WdfRequestSend(request, ctx->Target, &options)) return;
     status = WdfRequestGetStatus(request);
     WdfSpinLockAcquire(ctx->Lock);

@@ -1,7 +1,7 @@
 <Window x:Class="Lhdc.ControlPanel.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="LHDC Control Panel" Width="920" Height="640" MinWidth="820" MinHeight="560"
+    Title="LHDC Control Panel" Width="920" Height="800" MinWidth="820" MinHeight="600"
     Background="#F7F9FC" Foreground="{StaticResource Ink}" FontFamily="Microsoft YaHei UI"
     UseLayoutRounding="True" TextOptions.TextFormattingMode="Display"
     WindowStartupLocation="CenterScreen" Loaded="OnLoaded" Closing="OnClosing">
@@ -81,8 +81,13 @@
                             </Grid>
                             <Grid x:Name="ParameterGrid" Margin="0,26,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="132"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <TextBlock Text="LHDC 码率" VerticalAlignment="Center"/>
-                                <ComboBox x:Name="BitrateBox" Grid.Column="1" DisplayMemberPath="Label" AutomationProperties.Name="LHDC 码率" SelectionChanged="ParameterChanged"/>
+                                <TextBlock Text="LHDC 码率" VerticalAlignment="Top" Margin="0,11,0,0"/>
+                                <StackPanel Grid.Column="1">
+                                    <ComboBox x:Name="BitrateBox" DisplayMemberPath="Label" AutomationProperties.Name="LHDC 码率" SelectionChanged="ParameterChanged"/>
+                                    <CheckBox x:Name="AdaptiveBitrateBox" Content="自适应码率" Margin="0,16,0,0" Click="AdaptiveBitrateChanged"/>
+                                    <TextBlock x:Name="BitrateHint" Style="{StaticResource Hint}" Margin="0,7,0,0" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="ActiveBitrateText" Style="{StaticResource Hint}" Margin="0,7,0,0"/>
+                                </StackPanel>
                             </Grid>
                         </StackPanel>
                     </Border>

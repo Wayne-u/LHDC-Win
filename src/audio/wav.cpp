@@ -81,11 +81,15 @@ void write_wav(const std::filesystem::path& path,const Wav& wav) {
     out.write(reinterpret_cast<const char*>(wav.pcm.data()),wav.pcm.size());
     out.close();
 }
-void write_test_wav(const std::filesystem::path& path,unsigned seconds,std::uint32_t rate,std::uint32_t bits,bool loop) {
+void write_test_wav(const std::filesystem::path& path,unsigned seconds,std::uint32_t rate,std::uint32_t bits,bool loop,bool silent) {
     quality_index(Profile{rate,bits,400});
     if (seconds==0 || seconds>600) throw std::invalid_argument("Test tone duration must be 1..600 seconds");
     const auto frames=seconds*rate;
     const auto alignment=2u*(bits/8);
+    if (silent) {
+        write_wav(path,{rate,bits,std::vector<std::uint8_t>(static_cast<std::size_t>(frames)*alignment)});
+        return;
+    }
     std::ofstream out(path,std::ios::binary);
     if (!out) throw std::runtime_error("Cannot create WAV");
     out.exceptions(std::ios::badbit | std::ios::failbit);

@@ -9,7 +9,7 @@ The following components retain their own licenses:
 | `third_party/windows-driver-samples` | [MS-PL](licenses/MS-PL.txt) | Copyright (c) Microsoft Corporation, revision `2dc3fd3a0cc84a2933f2194e7ec0871584979071` |
 | `drivers/audio/minipairs.h`, `drivers/audio/speakerwavtable.h` | [MS-PL](licenses/MS-PL.txt) | Modified from Microsoft SimpleAudioSample; original copyright notices retained |
 
-`scripts/Build-AudioDriver.ps1` prepares a modified SimpleAudioSample framework
+`scripts/Build.ps1 -Target Audio` prepares a modified SimpleAudioSample framework
 under the ignored `build/audio-reference` directory. That framework retains
 MS-PL and the upstream copyright notices. The modifications replace the sample
 paths with the LHDC render path, PCM export, format selection and AVRCP volume

@@ -3,6 +3,7 @@ param(
     [ValidateSet(44100,48000,96000,192000)][int]$SampleRate=48000,
     [ValidateSet(16,24)][int]$Bits=24,
     [int]$Kbps=400,
+    [switch]$AdaptiveBitrate,
     [string]$ResultFile
 )
 $ErrorActionPreference='Stop'
@@ -107,8 +108,10 @@ function Write-CodecProfile {
     $registry=[Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SOFTWARE\LHDC-Win')
     try {
         $script:previousProfile=$registry.GetValue('Profile')
+        $script:previousAdaptive=$registry.GetValue('AdaptiveBitrate')
         [byte[]]$profileBytes=@([BitConverter]::GetBytes($SampleRate)+[BitConverter]::GetBytes($Bits)+[BitConverter]::GetBytes($Kbps))
         $registry.SetValue('Profile',$profileBytes,[Microsoft.Win32.RegistryValueKind]::Binary)
+        $registry.SetValue('AdaptiveBitrate',[int][bool]$AdaptiveBitrate,[Microsoft.Win32.RegistryValueKind]::DWord)
     } finally { $registry.Dispose() }
     # Grant normal users only data-value writes on this codec-only key. The
     # service independently validates the fixed profile before using it.
@@ -120,6 +123,7 @@ function Write-CodecProfile {
 }
 $bound=$false
 $previousProfile=$null
+$previousAdaptive=$null
 try {
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Audio mode installation requires an administrator process.' }
@@ -294,7 +298,11 @@ try {
             $result.Recovery=Restore-InboxAudio 'recovery'
             if ($null -ne $previousProfile) {
                 $registry=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\LHDC-Win',$true)
-                try { $registry.SetValue('Profile',$previousProfile,[Microsoft.Win32.RegistryValueKind]::Binary) } finally { $registry.Dispose() }
+                try {
+                    $registry.SetValue('Profile',$previousProfile,[Microsoft.Win32.RegistryValueKind]::Binary)
+                    if ($null -eq $previousAdaptive) { $registry.DeleteValue('AdaptiveBitrate',$false) }
+                    else { $registry.SetValue('AdaptiveBitrate',$previousAdaptive,[Microsoft.Win32.RegistryValueKind]::DWord) }
+                } finally { $registry.Dispose() }
             }
         } catch { $result.RecoveryError=$_.Exception.Message }
     }

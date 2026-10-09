@@ -14,10 +14,13 @@ public:
     std::uint32_t block_samples() const { return block_samples_; }
     std::size_t block_bytes() const { return block_samples_ * 2u * (profile_.bits/8); }
     EncodedPacket encode(std::span<const std::uint8_t> pcm);
+    void set_bitrate(std::uint32_t kbps);
+    std::uint32_t bitrate() const { return profile_.kbps; }
 private:
     std::unique_ptr<lhdcv5_enc_t, decltype(&lhdcv5_enc_free)> handle_{nullptr, lhdcv5_enc_free};
     std::uint32_t block_samples_ = 0;
     std::uint32_t mtu_;
     Profile profile_;
+    std::uint32_t buffered_frames_=0;
 };
 }

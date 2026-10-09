@@ -1,7 +1,7 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $root=Split-Path -Parent $PSScriptRoot
-$source=Get-Content -LiteralPath (Join-Path $root 'scripts/Verify-LongPlayback.ps1') -Encoding UTF8 -Raw
+$source=Get-Content -LiteralPath (Join-Path $root 'scripts/Verify-Playback.ps1') -Encoding UTF8 -Raw
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 if($errors.Count) { throw ($errors.Message -join '; ') }

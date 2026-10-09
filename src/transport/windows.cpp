@@ -192,24 +192,18 @@ Transport::Transport(std::uint64_t address):address_(address) {
     } catch (...) { CloseHandle(handle_); handle_=INVALID_HANDLE_VALUE; throw; }
 }
 Transport::~Transport() { if (handle_!=INVALID_HANDLE_VALUE) CloseHandle(handle_); }
-DWORD Transport::ioctl(DWORD code,void* input,DWORD input_size,void* output,DWORD output_size,DWORD timeout_ms,SendTiming* timing) {
+DWORD Transport::ioctl(DWORD code,void* input,DWORD input_size,void* output,DWORD output_size,DWORD timeout_ms) {
     OVERLAPPED overlapped{};
     overlapped.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     if (!overlapped.hEvent) win_error("I/O event");
     struct Event { HANDLE value; ~Event(){CloseHandle(value);} } event{overlapped.hEvent};
     DWORD transferred=0;
-    const auto started=std::chrono::steady_clock::now();
     const auto completed=DeviceIoControl(handle_,code,input,input_size,output,output_size,&transferred,&overlapped);
     const auto ioctl_error=completed ? ERROR_SUCCESS : GetLastError();
-    const auto submitted=std::chrono::steady_clock::now();
-    if(timing) timing->submit_us=std::chrono::duration_cast<std::chrono::microseconds>(submitted-started).count();
     if (!completed) {
         if (ioctl_error!=ERROR_IO_PENDING) throw WindowsError("Transport IOCTL",ioctl_error);
-        if(timing) timing->pending=true;
         const auto wait=WaitForSingleObject(overlapped.hEvent,timeout_ms);
         const auto wait_error=wait==WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT;
-        const auto waited=std::chrono::steady_clock::now();
-        if(timing) timing->wait_us=std::chrono::duration_cast<std::chrono::microseconds>(waited-submitted).count();
         if (wait!=WAIT_OBJECT_0) {
             CancelIoEx(handle_,&overlapped);
             // OVERLAPPED, event, and user buffers must survive cancellation completion.
@@ -217,7 +211,6 @@ DWORD Transport::ioctl(DWORD code,void* input,DWORD input_size,void* output,DWOR
             throw WindowsError("Transport I/O wait",wait_error);
         }
         if (!GetOverlappedResult(handle_,&overlapped,&transferred,FALSE)) win_error("Transport completion");
-        if(timing) timing->completion_us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-waited).count();
     }
     return transferred;
 }
@@ -246,16 +239,72 @@ void Transport::close(ULONG channel) {
     ioctl(IOCTL_LHDC_CLOSE,&input,sizeof(input),nullptr,0);
     connected_[index]=false;
 }
-SendTiming Transport::send(std::span<const std::uint8_t> bytes,ULONG channel) {
+Transport::PendingSend::PendingSend(HANDLE handle,std::vector<std::uint8_t> input):handle_(handle),input_(std::move(input)) {
+    overlapped_.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    if (!overlapped_.hEvent) win_error("Send event");
+}
+Transport::PendingSend::~PendingSend() {
+    if (active_) {
+        CancelIoEx(handle_,&overlapped_);
+        DWORD transferred=0;
+        // Even cancellation must finish before releasing OVERLAPPED and buffers.
+        GetOverlappedResult(handle_,&overlapped_,&transferred,TRUE);
+    }
+    CloseHandle(overlapped_.hEvent);
+}
+std::int64_t Transport::PendingSend::pending_age_us() const {
+    if (!active_) return 0;
+    const auto result=WaitForSingleObject(overlapped_.hEvent,0);
+    if (result==WAIT_OBJECT_0) return 0;
+    if (result!=WAIT_TIMEOUT) win_error("Send completion status");
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-submitted_).count();
+}
+SendTiming Transport::PendingSend::wait() {
+    if (!active_) return timing_;
+    // Completed requests may remain in the window until a later packet retires
+    // them. Their retention time is not Bluetooth congestion.
+    timing_.pending_age_us=pending_age_us();
+    const auto started=std::chrono::steady_clock::now();
+    const auto result=WaitForSingleObject(overlapped_.hEvent,10000);
+    const auto error=result==WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT;
+    const auto waited=std::chrono::steady_clock::now();
+    timing_.wait_us=std::chrono::duration_cast<std::chrono::microseconds>(waited-started).count();
+    if (timing_.pending_age_us) timing_.pending_age_us+=timing_.wait_us;
+    DWORD transferred=0;
+    if (result!=WAIT_OBJECT_0) {
+        CancelIoEx(handle_,&overlapped_);
+        GetOverlappedResult(handle_,&overlapped_,&transferred,TRUE);
+        active_=false;
+        throw WindowsError("Media send wait",error);
+    }
+    const auto completed=GetOverlappedResult(handle_,&overlapped_,&transferred,FALSE);
+    const auto completion_error=completed ? ERROR_SUCCESS : GetLastError();
+    active_=false;
+    timing_.completion_us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-waited).count();
+    if (!completed) throw WindowsError("Send completion",completion_error);
+    return timing_;
+}
+std::unique_ptr<Transport::PendingSend> Transport::begin_send(std::span<const std::uint8_t> bytes,ULONG channel) {
     const auto index=channel_index(channel);
     if (!connected_[index] || bytes.empty() || bytes.size()>out_mtu_[index]) throw std::invalid_argument("SDU exceeds channel MTU or channel is closed");
     std::vector<std::uint8_t> input(sizeof(LHDC_SDU_HEADER)+bytes.size());
     LHDC_SDU_HEADER header{{static_cast<ULONG>(input.size()),LHDC_ABI_VERSION},channel,static_cast<ULONG>(bytes.size())};
     std::memcpy(input.data(),&header,sizeof(header));
     std::memcpy(input.data()+sizeof(header),bytes.data(),bytes.size());
-    SendTiming timing;
-    ioctl(IOCTL_LHDC_SEND,input.data(),static_cast<DWORD>(input.size()),nullptr,0,10000,&timing);
-    return timing;
+    auto request=std::unique_ptr<PendingSend>(new PendingSend(handle_,std::move(input)));
+    DWORD transferred=0;
+    const auto started=std::chrono::steady_clock::now();
+    request->submitted_=started;
+    const auto completed=DeviceIoControl(handle_,IOCTL_LHDC_SEND,request->input_.data(),static_cast<DWORD>(request->input_.size()),nullptr,0,&transferred,&request->overlapped_);
+    const auto error=completed ? ERROR_SUCCESS : GetLastError();
+    request->timing_.submit_us=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+    if (!completed && error!=ERROR_IO_PENDING) throw WindowsError("Send submission",error);
+    request->active_=!completed;
+    request->timing_.pending=!completed;
+    return request;
+}
+SendTiming Transport::send(std::span<const std::uint8_t> bytes,ULONG channel) {
+    return begin_send(bytes,channel)->wait();
 }
 std::vector<std::uint8_t> Transport::receive(ULONG channel,DWORD timeout_ms) {
     const auto index=channel_index(channel);

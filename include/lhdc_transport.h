@@ -4,6 +4,8 @@
 #define LHDC_AVDTP_PSM 0x0019u
 #define LHDC_AVCTP_PSM 0x0017u
 #define LHDC_MAX_SDU 4096u
+/* Bound outstanding Bluetooth transfers independently of the PCM queue. */
+#define LHDC_MEDIA_SEND_WINDOW 4u
 #define LHDC_CHANNEL_SIGNAL 1u
 #define LHDC_CHANNEL_MEDIA 2u
 #define LHDC_CHANNEL_AVRCP 3u

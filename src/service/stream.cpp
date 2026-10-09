@@ -1,5 +1,7 @@
 #include "stream.hpp"
 #include "progress_log.hpp"
+#include "status.hpp"
+#include "codec/bitrate_control.hpp"
 #include <sstream>
 #include <syncstream>
 #include "audio/direct_pcm.hpp"
@@ -27,6 +29,9 @@ Profile service_profile() {
 }
 namespace {
 bool same(Profile a,Profile b) { return a.sample_rate==b.sample_rate && a.bits==b.bits && a.kbps==b.kbps; }
+std::uint64_t clock_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 bool stopped(HANDLE stop) {
     const auto result=WaitForSingleObject(stop,0);
     if (result!=WAIT_OBJECT_0 && result!=WAIT_TIMEOUT) throw std::runtime_error("Service stop wait failed");
@@ -34,7 +39,7 @@ bool stopped(HANDLE stop) {
 }
 void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,const HfpActivity& hfp) {
     AudioTask priority; Pacer pacer;
-    const auto quality=profile;
+    auto quality=profile;
     const auto revision=capability_revision();
     MediaSession session(target_device().address,profile); session.discover();
     const auto& caps=session.peer_capabilities();
@@ -69,7 +74,11 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
     if (stopped(stop)) return;
     session.check();
     if (state.Channels!=2 || state.BlockAlign!=2*(state.Bits/8)) throw std::runtime_error("Direct PCM requires interleaved stereo");
-    Encoder encoder(profile,session.media_info().OutMtu-media_header_bytes);
+    auto adaptive=adaptive_bitrate_enabled();
+    BitrateControl bitrate_control(profile,adaptive,clock_ms());
+    auto encoding_profile=profile;
+    encoding_profile.kbps=bitrate_control.bitrate();
+    Encoder encoder(encoding_profile,session.media_info().OutMtu-media_header_bytes);
     Packetizer packetizer(session.media_info().OutMtu,encoder.block_samples());
     const std::size_t byte_rate=static_cast<std::size_t>(profile.sample_rate)*2*(profile.bits/8);
     const auto preroll_bytes=byte_rate*60/1000;
@@ -87,7 +96,7 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
     std::uint64_t overrun_recoveries=0;
     std::uint64_t send_stalls=0;
     std::int64_t max_hfp_check_us=0;
-    std::int64_t max_send_us=0,max_submit_us=0,max_io_wait_us=0,max_completion_us=0,max_encode_us=0,max_wait_us=0,max_report_us=0,max_profile_us=0,max_state_us=0,max_log_us=0;
+    std::int64_t max_send_us=0,max_submit_us=0,max_io_wait_us=0,max_completion_us=0,max_pending_age_us=0,max_encode_us=0,max_wait_us=0,max_report_us=0,max_profile_us=0,max_state_us=0,max_log_us=0;
     auto elapsed_us=[](auto start) { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count(); };
     while (!stopped(stop)) {
         const auto input=reader.stats();
@@ -106,8 +115,12 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
     };
     started=pace_origin(reader.stats()); auto report=std::chrono::steady_clock::now();
     std::vector<std::uint8_t> block(encoder.block_bytes());
-    std::osyncstream(std::cout) << "{\"event\":\"direct_audio_started\",\"source\":\"WaveRT\",\"sample_rate\":" << profile.sample_rate << ",\"bits\":" << profile.bits << ",\"kbps\":" << profile.kbps
-        << ",\"input_sample_rate\":" << state.SampleRate << ",\"input_bits\":" << state.Bits << ",\"input_float\":" << (state.FloatingPoint?"true":"false") << ",\"resampling\":false}" << std::endl;
+    bitrate_control=BitrateControl(profile,adaptive,clock_ms());
+    publish_active_bitrate(encoder.bitrate());
+    std::osyncstream(std::cout) << "{\"event\":\"direct_audio_started\",\"source\":\"WaveRT\",\"sample_rate\":" << profile.sample_rate << ",\"bits\":" << profile.bits << ",\"kbps\":" << encoder.bitrate()
+        << ",\"ceiling_kbps\":"<<profile.kbps<<",\"adaptive_bitrate\":"<<(adaptive?"true":"false")
+        << ",\"input_sample_rate\":" << state.SampleRate << ",\"input_bits\":" << state.Bits << ",\"input_float\":" << (state.FloatingPoint?"true":"false")
+        << ",\"media_send_window\":" << LHDC_MEDIA_SEND_WINDOW << ",\"resampling\":false}" << std::endl;
     ProgressLog progress(std::cout);
     while (!stopped(stop)) {
         if(std::chrono::steady_clock::now()>=next_hfp_check) {
@@ -147,18 +160,30 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
         max_submit_us=std::max(max_submit_us,timing.submit_us);
         max_io_wait_us=std::max(max_io_wait_us,timing.wait_us);
         max_completion_us=std::max(max_completion_us,timing.completion_us);
+        max_pending_age_us=std::max(max_pending_age_us,timing.pending_age_us);
         constexpr std::int64_t send_stall_warning_us=100000;
         if(send_us>=send_stall_warning_us) {
             ++send_stalls;
             std::osyncstream(std::cout)<<"{\"event\":\"media_send_stall\",\"send_us\":"<<send_us
                 <<",\"packet\":"<<(packets+1)<<",\"elapsed_ms\":"<<elapsed_us(started)/1000
                 <<",\"submit_us\":"<<timing.submit_us<<",\"io_wait_us\":"<<timing.wait_us<<",\"completion_us\":"<<timing.completion_us
-                <<",\"io_pending\":"<<(timing.pending?"true":"false")<<"}"<<std::endl;
+                <<",\"pending_age_us\":"<<timing.pending_age_us<<",\"io_pending\":"<<(timing.pending?"true":"false")<<"}"<<std::endl;
         }
         frames+=packet.frames; ++packets; bytes+=sdu.size();
         if (std::chrono::steady_clock::now()-report>=std::chrono::seconds(1)) {
             const auto report_started=std::chrono::steady_clock::now();
-            if (!same(quality,service_profile()) || revision!=capability_revision()) break;
+            const auto requested=service_profile();
+            if (requested.sample_rate!=quality.sample_rate || requested.bits!=quality.bits || revision!=capability_revision()) break;
+            const auto requested_adaptive=adaptive_bitrate_enabled();
+            if (!same(quality,requested) || requested_adaptive!=adaptive) {
+                const auto selected=follow_pcm(requested,state.SampleRate,state.Bits,state.FloatingPoint!=0);
+                if (!session.supports_bitrate(selected)) break;
+                adaptive=requested_adaptive;
+                bitrate_control=BitrateControl(selected,adaptive,clock_ms());
+                profile=selected; quality=requested;
+                std::osyncstream(std::cout)<<"{\"event\":\"codec_bitrate_settings\",\"ceiling_kbps\":"<<profile.kbps
+                    <<",\"adaptive_bitrate\":"<<(adaptive?"true":"false")<<"}"<<std::endl;
+            }
             max_profile_us=std::max(max_profile_us,elapsed_us(report_started));
             const auto state_started=std::chrono::steady_clock::now();
             const auto capture=reader.stats();
@@ -166,12 +191,13 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
             max_state_us=std::max(max_state_us,elapsed_us(state_started));
             const auto log_started=std::chrono::steady_clock::now();
             std::ostringstream snapshot;
-            snapshot << "{\"event\":\"direct_audio_progress\",\"packets\":" << packets << ",\"bytes\":" << bytes << ",\"nonzero_blocks\":" << nonzero_blocks
+            snapshot << "{\"event\":\"direct_audio_progress\",\"kbps\":"<<encoder.bitrate()<<",\"packets\":" << packets << ",\"bytes\":" << bytes << ",\"nonzero_blocks\":" << nonzero_blocks
                 << ",\"queue_ms\":" << 1000.0*capture.queue.queued/byte_rate << ",\"queue_limit_ms\":"<<pcm_queue_duration_ms<<",\"queue_high_water_bytes\":"<<capture.queue.high_water
                 << ",\"buffered_bytes\":" << info.BufferedBytes << ",\"produced_bytes\":" << info.ProducedBytes
                 << ",\"dropped_bytes\":" << info.DroppedBytes << ",\"dropped_bytes_total\":" << capture.dropped_bytes() << ",\"overrun_recoveries\":" << capture.overrun_recoveries
                 << ",\"kernel_dropped_bytes_total\":"<<capture.kernel_dropped_bytes<<",\"discarded_pcm_bytes_total\":"<<capture.discarded_bytes
                 << ",\"max_send_us\":" << max_send_us << ",\"max_submit_us\":"<<max_submit_us<<",\"max_io_wait_us\":"<<max_io_wait_us<<",\"max_completion_us\":"<<max_completion_us
+                << ",\"pending_age_us\":"<<timing.pending_age_us<<",\"max_pending_age_us\":"<<max_pending_age_us
                 << ",\"send_stalls\":"<<send_stalls<<",\"max_hfp_check_us\":"<<max_hfp_check_us<<",\"max_read_gap_us\":" << capture.max_read_gap_us << ",\"max_read_us\":" << capture.max_read_us
                 << ",\"max_queue_wait_us\":"<<capture.max_queue_wait_us
                 << ",\"max_encode_us\":" << max_encode_us << ",\"max_wait_us\":" << max_wait_us << ",\"max_report_us\":" << max_report_us << ",\"max_profile_us\":" << max_profile_us << ",\"max_state_us\":" << max_state_us << ",\"max_log_us\":" << max_log_us << "}";
@@ -179,6 +205,17 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
             max_log_us=std::max(max_log_us,elapsed_us(log_started));
             max_report_us=std::max(max_report_us,elapsed_us(report_started));
             report=std::chrono::steady_clock::now();
+        }
+        const auto feedback=reader.stats();
+        const auto queue_ms=1000.0*feedback.queue.queued/byte_rate;
+        const auto desired=bitrate_control.observe(clock_ms(),queue_ms,feedback.dropped_bytes(),timing.pending_age_us/1000.0);
+        if(desired!=encoder.bitrate()) {
+            const auto previous=encoder.bitrate();
+            encoder.set_bitrate(desired);
+            publish_active_bitrate(desired);
+            std::osyncstream(std::cout)<<"{\"event\":\"codec_bitrate_changed\",\"previous_kbps\":"<<previous
+                <<",\"kbps\":"<<desired<<",\"adaptive_bitrate\":"<<(adaptive?"true":"false")
+                <<",\"queue_ms\":"<<queue_ms<<",\"pending_age_us\":"<<timing.pending_age_us<<",\"dropped_bytes_total\":"<<feedback.dropped_bytes()<<",\"restart\":false}"<<std::endl;
         }
     }
     reader.stop();
@@ -190,6 +227,7 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
         << ",\"kernel_dropped_bytes_total\":"<<capture.kernel_dropped_bytes<<",\"discarded_pcm_bytes_total\":"<<capture.discarded_bytes<<",\"queue_limit_ms\":"<<pcm_queue_duration_ms<<",\"queue_high_water_bytes\":"<<capture.queue.high_water
         << ",\"max_read_gap_us\":"<<capture.max_read_gap_us<<",\"max_queue_wait_us\":"<<capture.max_queue_wait_us
         << ",\"max_send_us\":"<<max_send_us<<",\"max_submit_us\":"<<max_submit_us<<",\"max_io_wait_us\":"<<max_io_wait_us<<",\"max_completion_us\":"<<max_completion_us
+        << ",\"max_pending_age_us\":"<<max_pending_age_us
         << ",\"send_stalls\":"<<send_stalls<<",\"max_hfp_check_us\":"<<max_hfp_check_us
         << ",\"pending_signal\":" << finished.pending_signal << ",\"pending_media\":" << finished.pending_media
         << ",\"pending_avrcp\":" << finished.pending_avrcp << "}" << std::endl;
@@ -200,6 +238,7 @@ void serve_audio(HANDLE stop,unsigned duration_seconds) {
     HfpActivity hfp;
     bool was_hfp=false;
     auto last_format=service_profile();
+    publish_active_bitrate(0);
     const auto started=std::chrono::steady_clock::now();
     std::jthread duration;
     if (duration_seconds) duration=std::jthread([&](std::stop_token token) {
@@ -233,7 +272,9 @@ void serve_audio(HANDLE stop,unsigned duration_seconds) {
         } catch (const std::exception& error) {
             std::cerr << "{\"event\":\"service_audio_error\",\"message\":" << json_string(error.what()) << "}" << std::endl;
         }
+        publish_active_bitrate(0);
         if (retry && WaitForSingleObject(stop,1000)==WAIT_OBJECT_0) break;
     }
+    publish_active_bitrate(0);
 }
 }

@@ -38,9 +38,11 @@ public:
                 u_long nonblocking=1;
                 if(ioctlsocket(candidate,FIONBIO,&nonblocking)) socket_error("RFCOMM nonblocking mode");
                 SOCKADDR_BTH peer{};peer.addressFamily=AF_BTH;peer.btAddr=address;peer.serviceClassId=service;
-                if(connect(candidate,reinterpret_cast<sockaddr*>(&peer),sizeof(peer))==SOCKET_ERROR && WSAGetLastError()!=WSAEWOULDBLOCK)
-                    socket_error("HeyMelody service connect");
-                wait(candidate,true,Clock::now()+std::chrono::seconds(5));
+                if(connect(candidate,reinterpret_cast<sockaddr*>(&peer),sizeof(peer))==SOCKET_ERROR) {
+                    const auto error=WSAGetLastError();
+                    if(error!=WSAEWOULDBLOCK) socket_error("HeyMelody service connect",error);
+                    wait(candidate,true,Clock::now()+std::chrono::seconds(5),"HeyMelody connect");
+                }
                 int status=0,size=sizeof(status);
                 if(getsockopt(candidate,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&status),&size)) socket_error("RFCOMM connection status");
                 if(status) socket_error("HeyMelody service connect",status);
@@ -62,9 +64,10 @@ public:
         const auto sequence=sequence_++;
         const auto packet=hey::encode({command,sequence,hey::Bytes(payload.begin(),payload.end())});
         const auto deadline=Clock::now()+std::chrono::seconds(5);
+        const auto operation="HeyMelody command "+std::to_string(command);
         std::size_t sent=0;
         while(sent<packet.size()) {
-            wait(socket_,true,deadline);
+            wait(socket_,true,deadline,operation.c_str());
             const auto count=send(socket_,reinterpret_cast<const char*>(packet.data()+sent),static_cast<int>(packet.size()-sent),0);
             if(count==SOCKET_ERROR) { if(WSAGetLastError()==WSAEWOULDBLOCK) continue;socket_error("HeyMelody send"); }
             if(!count) throw std::runtime_error("HeyMelody control channel closed during send");
@@ -74,7 +77,7 @@ public:
             while(const auto frame=framer_.next()) {
                 if(frame->command==(command|0x8000) && frame->sequence==sequence) return frame->payload;
             }
-            wait(socket_,false,deadline);
+            wait(socket_,false,deadline,operation.c_str());
             std::uint8_t buffer[512];
             const auto count=recv(socket_,reinterpret_cast<char*>(buffer),sizeof(buffer),0);
             if(count==SOCKET_ERROR) { if(WSAGetLastError()==WSAEWOULDBLOCK) continue;socket_error("HeyMelody receive"); }
@@ -83,14 +86,14 @@ public:
         }
     }
 private:
-    static void wait(SOCKET socket,bool writing,Clock::time_point deadline) {
+    static void wait(SOCKET socket,bool writing,Clock::time_point deadline,const char* operation) {
         const auto remaining=std::chrono::duration_cast<std::chrono::microseconds>(deadline-Clock::now()).count();
-        if(remaining<=0) throw std::runtime_error("HeyMelody control operation timed out");
+        if(remaining<=0) throw std::runtime_error(std::string(operation)+(writing?" send timed out":" response timed out"));
         fd_set ready{},errors{};FD_SET(socket,&ready);FD_SET(socket,&errors);
         timeval timeout{static_cast<long>(remaining/1000000),static_cast<long>(remaining%1000000)};
         const auto result=select(0,writing?nullptr:&ready,writing?&ready:nullptr,&errors,&timeout);
         if(result==SOCKET_ERROR) socket_error("RFCOMM wait");
-        if(!result) throw std::runtime_error("HeyMelody control operation timed out");
+        if(!result) throw std::runtime_error(std::string(operation)+(writing?" send timed out":" response timed out"));
         if(FD_ISSET(socket,&errors)) {
             int error=0,size=sizeof(error);
             if(getsockopt(socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&size)) socket_error("RFCOMM error status");

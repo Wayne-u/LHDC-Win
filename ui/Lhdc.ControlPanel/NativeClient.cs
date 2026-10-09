@@ -15,7 +15,10 @@ public sealed class NativeClient {
         using var key=Registry.LocalMachine.OpenSubKey(@"SOFTWARE\LHDC-Win");
         if(key?.GetValue("Profile") is not byte[] value) return null;
         if(value.Length!=12) throw new InvalidDataException("已安装的 LHDC 配置长度无效");
-        return new AudioProfile("lhdc",BitConverter.ToInt32(value,0),BitConverter.ToInt32(value,4),BitConverter.ToInt32(value,8));
+        var adaptive=key.GetValue("AdaptiveBitrate");
+        if(adaptive is not null && (adaptive is not int flag || flag is < 0 or > 1))
+            throw new InvalidDataException("自适应码率配置无效");
+        return new AudioProfile("lhdc",BitConverter.ToInt32(value,0),BitConverter.ToInt32(value,4),BitConverter.ToInt32(value,8),adaptive is int enabled && enabled==1);
     }
     public static void ApplyCodecProfile(AudioProfile profile) {
         var installed=InstalledProfile();
@@ -25,6 +28,7 @@ public sealed class NativeClient {
             ?? throw new IOException("LHDC 配置尚未安装");
         byte[] value=[..BitConverter.GetBytes(profile.SampleRate),..BitConverter.GetBytes(profile.Bits),..BitConverter.GetBytes(profile.Kbps)];
         key.SetValue("Profile",value,RegistryValueKind.Binary);
+        key.SetValue("AdaptiveBitrate",profile.AdaptiveBitrate?1:0,RegistryValueKind.DWord);
     }
     public WorkspaceConfig Config { get; }
     public NativeClient() {
@@ -48,7 +52,8 @@ public sealed class NativeClient {
     }
     public Task<JsonObject> SetAudioMode(string mode,AudioProfile profile,string resultFile) {
         var script=Path.Combine(Config.WorkspaceRoot,"scripts","Set-AudioMode.ps1");
-        var command=$"& {Quote(script)} -Mode {Quote(mode)} -SampleRate {profile.SampleRate} -Bits {profile.Bits} -Kbps {profile.Kbps} -ResultFile {Quote(resultFile)}";
+        var adaptive=profile.AdaptiveBitrate?" -AdaptiveBitrate":"";
+        var command=$"& {Quote(script)} -Mode {Quote(mode)} -SampleRate {profile.SampleRate} -Bits {profile.Bits} -Kbps {profile.Kbps}{adaptive} -ResultFile {Quote(resultFile)}";
         return RunElevated(command,resultFile);
     }
     private static string Quote(string value)=>"'"+value.Replace("'","''")+"'";

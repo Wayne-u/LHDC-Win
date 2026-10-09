@@ -5,15 +5,16 @@
 #include <atomic>
 #include <thread>
 #include <memory>
+#include <deque>
 #include "audio/volume_sync.hpp"
 namespace lhdc {
 struct SessionCompletion { std::uint64_t bytes; ULONG pending_signal,pending_media,pending_avrcp; };
 class MediaSession {
 public:
+    bool supports_bitrate(Profile profile) const;
     MediaSession(std::uint64_t remote,Profile profile):transport_(remote),protocol_(transport_,profile),profile_(profile){}
     ~MediaSession();
     MediaSession(const MediaSession&)=delete;
-    void open();
     void discover();
     void configure(Profile profile);
     const avdtp::Bytes& peer_capabilities() const { return peer_caps_; }
@@ -36,6 +37,7 @@ private:
     std::atomic<bool> stop_=false,signal_failed_=false;
     std::exception_ptr monitor_error_;
     std::uint64_t sent_bytes_=0;
+    std::deque<std::unique_ptr<Transport::PendingSend>> pending_media_;
     bool finished_=false;
 };
 }

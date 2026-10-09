@@ -45,6 +45,12 @@ int main() {
             const auto read=lhdc::read_wav(path);
             require(read.sample_rate==wav.sample_rate && read.bits==wav.bits && read.pcm==wav.pcm,"Captured PCM WAV preserves channel bytes and signed samples");
         }
+        for (const auto bits:{16u,24u}) {
+            lhdc::write_test_wav(path,1,96000,bits,false,true);
+            const auto silent=lhdc::read_wav(path);
+            require(silent.sample_rate==96000 && silent.bits==bits && silent.pcm.size()==96000*2*(bits/8),"Silent test WAV has the exact selected format and duration");
+            require(std::all_of(silent.pcm.begin(),silent.pcm.end(),[](auto value){return value==0;}),"Silent verification must not emit a test tone");
+        }
         std::filesystem::remove(path);
         std::cout << "Audio queue bounds, sample order and packed PCM round trips passed\n";
         return 0;

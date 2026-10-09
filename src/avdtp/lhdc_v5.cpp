@@ -54,7 +54,6 @@ Bytes select_configuration(std::span<const std::uint8_t> raw,const Profile& prof
         throw std::runtime_error("Requested profile exceeds peer LHDC V5 capabilities");
     return local_capabilities(profile);
 }
-Bytes select_48k_s16_400(std::span<const std::uint8_t> raw) { return select_configuration(raw,Profile{}); }
 void verify_configuration(std::span<const std::uint8_t> expected,std::span<const std::uint8_t> actual) {
     auto left=capabilities(expected),right=capabilities(actual);
     auto order=[](const Capability& a,const Capability& b){return a.category<b.category;};

@@ -10,14 +10,16 @@
 | `pwsh -NoProfile -File scripts/Verify.ps1` | 九个编码器 SHA256 向量、非法参数、60 秒离线编码、Unicode 路径及所有当前能力配置的 RTP 序列/时间戳/边界 | 不播放、不绑定驱动；MTU 672 是离线预算 |
 | `pwsh -NoProfile -File scripts/Verify-Deployment.ps1` | 有效包、SYS/INF/CAT 篡改、错误签名公钥和错误目标实例 | 不修改信任库、启动配置或驱动绑定 |
 | `pwsh -NoProfile -File scripts/Verify-UnifiedEndpoint.ps1` | 44.1/48 kHz × 16/24 位单端点、实际 WaveRT PCM、24 位低字节 | 管理员、耳机连接；切换格式并暂停服务，结束恢复原格式；不验证蓝牙听音 |
-| `pwsh -NoProfile -File scripts/Verify-LongPlayback.ps1 -Minutes 1` | 同一 WASAPI 会话持续提交；发送完成、丢弃、恢复、挂起和错误 | LHDC 已部署、耳机保持连接；默认静音，增加 `-Audible` 为低音量测试音 |
-| `pwsh -NoProfile -File scripts/Verify-CallSwitch.ps1` | 打开麦克风约 8 秒，Windows 原生路由、24 位音乐恢复和采集计数 | 单端点、24 位 LHDC；默认静音，增加 `-Audible` 后需人工确认听音；不保存麦克风内容 |
+| `pwsh -NoProfile -File scripts/Verify-Playback.ps1 -Minutes 1` | 同一 WASAPI 会话持续提交；发送完成、丢弃、恢复、挂起和错误 | LHDC 已部署、耳机保持连接；默认静音，增加 `-Audible` 为低音量测试音 |
+| `pwsh -NoProfile -File scripts/Verify-Playback.ps1 -Mode Call` | 打开麦克风约 8 秒，Windows 原生路由、24 位音乐恢复和采集计数 | 单端点、24 位 LHDC；默认静音，增加 `-Audible` 后需人工确认听音；不保存麦克风内容 |
 
 长测分钟数可以调整；30 分钟以上验证目前由用户暂缓。测试期间不要取下、断开或切换耳机到手机，避免将连接变化误判为链路缺陷。持续播放验证先核对服务二进制与当前构建一致；完成渲染不等于严格零丢弃，失败原因在 `FailureReasons` 中。
 
 启用并读回 Hi-Res 后，可给 `Verify-UnifiedEndpoint.ps1` 传入 `-SampleRates 96000,192000`，验证高采样率的单端点与实际 PCM。该脚本会关闭发送服务，不能代替蓝牙听音。`profile-options HEX [MTU]` 可按无线载荷预算过滤码率；离线验证使用 672 字节 MTU，因此不包含单帧无法容纳的 44.1 kHz / 1000 kbps。
 
 读取线程回归用受控停顿验证样本顺序：44.1/48/96/192 kHz × 16/24 位下 355 ms 停顿零丢弃，700 ms 停顿明确报告溢出。纯日志判定测试检查错误、发送未完成、挂起、主动丢弃及缺失字段，避免通过指标缺失掩盖失败。
+
+核心回归还覆盖编码器运行时码率切换后的帧计数、RTP 连续性和 MTU 限制，以及自适应的短时积压、联合发送压力、判断间隔内的发送峰值、严重拥塞跨档下降、丢弃增量、稳定等待、上下限与 44.1 kHz 档位。实机验证通过面板在原协商范围内修改码率或切换自适应，核对服务日志中只有一个音频会话、无丢弃、发送完成一致；`audio-status` 的 `active_kbps` 是实际播放码率，`adaptive_bitrate` 是当前开关。`pending_age_us` 表示未完成发送的观察等待时间，完成后延迟回收不计入；它仍可能包含调度延迟，不能独立证明无线重传。受控积压试验不能代替真实无线拥塞或听音验证。
 
 ## 诊断命令
 
@@ -39,7 +41,7 @@
 
 - `result.json` 保存本轮范围、结果、错误与证据路径；`service.jsonl` 保存对应时段服务日志。软件验证不能自行将 `HearingVerified` 标为通过。
 - 离线验证和部署校验自动清理临时二进制、测试音和篡改包；持续播放/通话测试退出时删除测试 WAV。四格式验证成功后删除 PCM 与 WAV，失败格式的原始数据保留供定位。
-- 关键历史结果、必要服务日志和麦克风 ETW 的索引见验证状态；重复试验和临时分析脚本不作为长期文档。
+- 验证状态只索引核心通过结果、代表性失败及未解决问题。重复试验、可重新生成的测试音、离线码流和一次性分析脚本清理；必要原始追踪保留。
 - `build/test-certificate`、签名驱动包和当前构建工具应保留。清理测试证据不涉及已安装驱动、配置、证书或部署恢复状态。
 
 实际验证结论与已知限制见 [验证状态](status.md)。

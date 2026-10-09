@@ -13,6 +13,5 @@ struct V5Capabilities {
 };
 V5Capabilities v5_capabilities(std::span<const std::uint8_t> raw);
 Bytes select_configuration(std::span<const std::uint8_t> peer_capabilities,const Profile& profile);
-Bytes select_48k_s16_400(std::span<const std::uint8_t> peer_capabilities);
 void verify_configuration(std::span<const std::uint8_t> expected,std::span<const std::uint8_t> actual);
 }

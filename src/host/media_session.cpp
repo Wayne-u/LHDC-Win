@@ -3,13 +3,11 @@
 #include "media/packetizer.hpp"
 #include <iostream>
 #include <syncstream>
+#include <algorithm>
 namespace av=lhdc::avdtp;
 namespace lhdc {
 static void cleanup_error(const char* event,const std::exception& error) {
     std::osyncstream(std::cerr) << "{\"event\":" << json_string(event) << ",\"message\":" << json_string(error.what()) << "}" << std::endl;
-}
-void MediaSession::open() {
-    discover(); configure(profile_);
 }
 void MediaSession::discover() {
     volume_=std::make_unique<VolumeSync>(transport_);
@@ -65,8 +63,29 @@ void MediaSession::check() {
     volume_->check();
     if (signal_failed_.load()) throw std::runtime_error("Signalling monitor failed during media transmission");
 }
+bool MediaSession::supports_bitrate(Profile profile) const {
+    const auto range=av::v5_capabilities(av::local_capabilities(profile_));
+    return profile.sample_rate==profile_.sample_rate && profile.bits==profile_.bits &&
+        profile.kbps>=range.min_kbps && profile.kbps<=range.max_kbps &&
+        encoded_frame_bytes(profile)<=media_info_.OutMtu-media_header_bytes;
+}
 SendTiming MediaSession::send(std::span<const std::uint8_t> sdu) {
-    check(); const auto timing=transport_.send(sdu,LHDC_CHANNEL_MEDIA); sent_bytes_+=sdu.size();return timing;
+    check();
+    SendTiming timing;
+    // Submit in RTP order and retire the oldest first. The shared window bounds
+    // user buffers and driver requests while Bluetooth completions are delayed.
+    if (pending_media_.size()==LHDC_MEDIA_SEND_WINDOW) {
+        timing=pending_media_.front()->wait();
+        pending_media_.pop_front();
+    }
+    auto request=transport_.begin_send(sdu,LHDC_CHANNEL_MEDIA);
+    timing.submit_us=request->timing().submit_us;
+    timing.pending=timing.pending || request->timing().pending;
+    pending_media_.push_back(std::move(request));
+    for (const auto& pending:pending_media_)
+        timing.pending_age_us=std::max(timing.pending_age_us,pending->pending_age_us());
+    sent_bytes_+=sdu.size();
+    return timing;
 }
 void MediaSession::stop_monitor() {
     stop_.store(true);
@@ -75,6 +94,10 @@ void MediaSession::stop_monitor() {
     monitor_.join();
 }
 SessionCompletion MediaSession::finish() {
+    while (!pending_media_.empty()) {
+        pending_media_.front()->wait();
+        pending_media_.pop_front();
+    }
     volume_.reset();
     stop_monitor();
     if (monitor_error_) std::rethrow_exception(monitor_error_);
@@ -94,6 +117,7 @@ SessionCompletion MediaSession::finish() {
 MediaSession::~MediaSession() {
     volume_.reset();
     stop_monitor();
+    pending_media_.clear();
     if (finished_) return;
     if (monitor_error_) {
         try { std::rethrow_exception(monitor_error_); } catch (const std::exception& error) { cleanup_error("signalling_monitor_failed",error); }

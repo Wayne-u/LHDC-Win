@@ -19,7 +19,7 @@ public partial class MainWindow : Window {
     private int sampleRate = 48000, bits = 24, preferredKbps = 400;
     private bool initializing = true, busy, refreshing, updatingParameters;
     private bool audioServiceRunning, profileEditable, modePendingConnection;
-    private bool formatEdited;
+    private bool formatEdited, bitrateEdited;
     private bool deviceAvailable;
     private bool headphoneConnected;
     private bool? hiResEnabled;
@@ -41,6 +41,7 @@ public partial class MainWindow : Window {
             sampleRate = installed.SampleRate;
             bits = installed.Bits;
             preferredKbps = CanonicalBitrate(installed.SampleRate, installed.Kbps);
+            AdaptiveBitrateBox.IsChecked = installed.AdaptiveBitrate;
             UpdateFormats();
             UpdateBitrates();
             await Refresh();
@@ -63,7 +64,7 @@ public partial class MainWindow : Window {
         ? kbps switch { 240 => 256, 480 => 500, _ => kbps } : kbps;
     private int ActualBitrate(int canonical) => sampleRate == 44100
         ? canonical switch { 256 => 240, 500 => 480, _ => canonical } : canonical;
-    private AudioProfile StoredProfile() => new(ModeBox.SelectedIndex == 0 ? "lhdc" : "windows", sampleRate, bits, ActualBitrate(preferredKbps));
+    private AudioProfile StoredProfile() => new(ModeBox.SelectedIndex == 0 ? "lhdc" : "windows", sampleRate, bits, ActualBitrate(preferredKbps), AdaptiveBitrateBox.IsChecked == true);
     private Task<JsonObject> ValidateProfile() {
         var kbps = ActualBitrate(((Choice)BitrateBox.SelectedItem).Value);
         var arguments = new[] {
@@ -111,9 +112,15 @@ public partial class MainWindow : Window {
     }
 
     private void ModeChanged(object sender, SelectionChangedEventArgs e) { if (!initializing) Edited(); }
+    private void AdaptiveBitrateChanged(object sender, RoutedEventArgs e) {
+        if (initializing) return;
+        bitrateEdited = true;
+        Edited();
+    }
     private void ParameterChanged(object sender, SelectionChangedEventArgs e) {
         if (initializing || updatingParameters) return;
         if (BitrateBox.SelectedItem is Choice choice) preferredKbps = choice.Value;
+        bitrateEdited = true;
         Edited();
     }
     private void Edited() {
@@ -134,6 +141,9 @@ public partial class MainWindow : Window {
         SaveButton.IsEnabled = ready && deviceAvailable && (!lhdc || BitrateBox.SelectedItem is Choice && SampleRateBox.SelectedItem is Choice && BitDepthBox.SelectedItem is Choice);
         RefreshButton.IsEnabled = ready;
         HiResBox.IsEnabled = ready && headphoneConnected && hiResEnabled.HasValue;
+        BitrateHint.Text = AdaptiveBitrateBox.IsChecked != true ? "固定使用所选码率。"
+            : preferredKbps <= 400 ? "当前码率没有可自动调节的档位。"
+            : "所选码率为上限；拥塞时降低，稳定后逐步恢复。";
         if (!lhdc) SaveButton.Content = "应用 Windows 驱动";
         else if (service == "lhdc-transport" && audioServiceRunning && profileEditable)
             SaveButton.Content = "应用参数";
@@ -179,6 +189,9 @@ public partial class MainWindow : Window {
         int problem = target?["problem"]?.GetValue<int>() ?? -1;
         audioServiceRunning = audio["running"]!.GetValue<bool>();
         profileEditable = audio["profile_editable"]?.GetValue<bool>() == true;
+        int activeKbps = audio["active_kbps"]?.GetValue<int>() ?? 0;
+        ActiveBitrateText.Text = activeKbps > 0 ? $"当前播放：{activeKbps} kbps" : "";
+        ActiveBitrateText.Visibility = activeKbps > 0 ? Visibility.Visible : Visibility.Collapsed;
         DriverText.Text = target is null || problem != 0 ? "音频设备暂不可用"
             : service == "BthA2dp" ? "Windows 标准音频"
             : service == "lhdc-transport" && audioServiceRunning ? "LHDC V5" : "LHDC V5 · 服务未运行";
@@ -197,6 +210,12 @@ public partial class MainWindow : Window {
             formatChanged |= sampleRate != selected.SampleRate || bits != selected.Bits;
             sampleRate = selected.SampleRate;
             bits = selected.Bits;
+            if (!bitrateEdited) {
+                int selectedKbps = CanonicalBitrate(selected.SampleRate, selected.Kbps);
+                formatChanged |= preferredKbps != selectedKbps;
+                preferredKbps = selectedKbps;
+                AdaptiveBitrateBox.IsChecked = selected.AdaptiveBitrate;
+            }
         }
         var devices = await client.Host("audio-devices");
         var endpoint = devices["devices"]!.AsArray().FirstOrDefault(d => {
@@ -272,6 +291,7 @@ public partial class MainWindow : Window {
             else await ApplyMode("LHDC");
         }
         formatEdited = false;
+        bitrateEdited = false;
         ProfileStore.Save(StoredProfile());
         if (modePendingConnection)
             StatusText.Text = ModeBox.SelectedIndex == 0 ? "LHDC 驱动已选择，等待耳机连接" : "Windows 驱动已选择，等待耳机连接";

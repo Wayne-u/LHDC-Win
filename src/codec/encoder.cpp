@@ -22,6 +22,17 @@ EncodedPacket Encoder::encode(std::span<const std::uint8_t> pcm) {
     check(lhdcv5_enc_encode(handle_.get(),pcm.data(),pcm.size(),packet.payload.data(),packet.payload.size(),&written,&packet.frames),"encode");
     if (written>mtu_ || ((written==0)!=(packet.frames==0))) throw std::runtime_error("Invalid encoder output boundary");
     packet.payload.resize(written);
+    ++buffered_frames_;
+    if (packet.frames>buffered_frames_) throw std::runtime_error("Encoder emitted more frames than supplied");
+    buffered_frames_-=packet.frames;
     return packet;
+}
+void Encoder::set_bitrate(std::uint32_t kbps) {
+    if (buffered_frames_) throw std::logic_error("Bitrate changes require a complete packet boundary");
+    const Profile selected{profile_.sample_rate,profile_.bits,kbps};
+    const auto quality=quality_index(selected);
+    if (encoded_frame_bytes(selected)>mtu_) throw std::invalid_argument("New bitrate exceeds the negotiated payload MTU");
+    check(lhdcv5_enc_set_bitrate_index(handle_.get(),quality,true),"encoder bitrate update");
+    profile_=selected;
 }
 }

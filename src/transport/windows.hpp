@@ -10,6 +10,8 @@
 #include <array>
 #include <optional>
 #include <stdexcept>
+#include <memory>
+#include <chrono>
 namespace lhdc {
 struct TargetDevice { std::wstring instance; std::uint64_t address; };
 std::optional<TargetDevice> discover_target();
@@ -25,11 +27,29 @@ void inspect_windows();
 void inspect_connection(std::uint64_t address);
 bool bluetooth_connected(std::uint64_t address);
 struct SendTiming {
-    std::int64_t submit_us=0,wait_us=0,completion_us=0;
+    std::int64_t submit_us=0,wait_us=0,completion_us=0,pending_age_us=0;
     bool pending=false;
 };
 class Transport {
 public:
+    class PendingSend {
+    public:
+        ~PendingSend();
+        PendingSend(const PendingSend&)=delete;
+        PendingSend& operator=(const PendingSend&)=delete;
+        SendTiming wait();
+        std::int64_t pending_age_us() const;
+        const SendTiming& timing() const { return timing_; }
+    private:
+        friend class Transport;
+        PendingSend(HANDLE handle,std::vector<std::uint8_t> input);
+        HANDLE handle_;
+        std::vector<std::uint8_t> input_;
+        OVERLAPPED overlapped_{};
+        SendTiming timing_;
+        std::chrono::steady_clock::time_point submitted_;
+        bool active_=false;
+    };
     explicit Transport(std::uint64_t address);
     ~Transport();
     Transport(const Transport&)=delete;
@@ -38,10 +58,11 @@ public:
     void open(ULONG channel=LHDC_CHANNEL_SIGNAL);
     void close(ULONG channel=LHDC_CHANNEL_SIGNAL);
     SendTiming send(std::span<const std::uint8_t> bytes,ULONG channel=LHDC_CHANNEL_SIGNAL);
+    std::unique_ptr<PendingSend> begin_send(std::span<const std::uint8_t> bytes,ULONG channel);
     std::vector<std::uint8_t> receive(ULONG channel=LHDC_CHANNEL_SIGNAL,DWORD timeout_ms=10000);
     void cancel_pending();
 private:
-    DWORD ioctl(DWORD code,void* input,DWORD input_size,void* output,DWORD output_size,DWORD timeout_ms=10000,SendTiming* timing=nullptr);
+    DWORD ioctl(DWORD code,void* input,DWORD input_size,void* output,DWORD output_size,DWORD timeout_ms=10000);
     HANDLE handle_=INVALID_HANDLE_VALUE;
     std::uint64_t address_;
     std::array<bool,LHDC_CHANNEL_COUNT> connected_{};
