@@ -168,6 +168,32 @@ static NTSTATUS SendBrbSync(DEVICE_CONTEXT* ctx, PBRB brb, ULONG size)
     return WdfIoTargetSendInternalIoctlOthersSynchronously(ctx->Target, NULL,
         IOCTL_INTERNAL_BTH_SUBMIT_BRB, &descriptor, NULL, NULL, &options, NULL);
 }
+static NTSTATUS WakeSignalLink(DEVICE_CONTEXT* ctx, BTH_ADDR address)
+{
+    struct _BRB_ACL_GET_MODE mode;
+    struct _BRB_ACL_ENTER_ACTIVE_MODE wake;
+    ULONGLONG started = KeQueryInterruptTime();
+    NTSTATUS status;
+    RtlZeroMemory(&mode, sizeof(mode));
+    ctx->Profile.BthInitializeBrb((PBRB)&mode, BRB_ACL_GET_MODE);
+    mode.BtAddress = address;
+    mode.AclMode = ACL_DISCONNECTED;
+    status = SendBrbSync(ctx, (PBRB)&mode, sizeof(mode));
+    if (NT_SUCCESS(status)) status = mode.Hdr.Status;
+    TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT,
+        "SIGNAL ACL mode=%u query=%!STATUS! bt=0x%02x", mode.AclMode, status, mode.Hdr.BtStatus);
+    if (!NT_SUCCESS(status)) return status;
+    if (mode.AclMode == ACL_MODE_ACTIVE || mode.AclMode == ACL_MODE_ENTER_ACTIVE) return STATUS_SUCCESS;
+    RtlZeroMemory(&wake, sizeof(wake));
+    ctx->Profile.BthInitializeBrb((PBRB)&wake, BRB_ACL_ENTER_ACTIVE_MODE);
+    wake.BtAddress = address;
+    status = SendBrbSync(ctx, (PBRB)&wake, sizeof(wake));
+    if (NT_SUCCESS(status)) status = wake.Hdr.Status;
+    TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT,
+        "SIGNAL ACL wake from=%u status=%!STATUS! bt=0x%08x elapsed_us=%u",
+        mode.AclMode, status, wake.Hdr.BtStatus, (ULONG)((KeQueryInterruptTime() - started) / 10));
+    return status;
+}
 static VOID TraceAclMode(CHANNEL_CONTEXT* slot)
 {
     DEVICE_CONTEXT* ctx = slot->DeviceContext;
@@ -674,6 +700,17 @@ VOID IoControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t inLe
         transfer->ChannelHandle = channel;
         if (code == IOCTL_LHDC_SEND) {
             if (input->PayloadSize == 0 || input->PayloadSize > slot->Info.OutMtu || input->PayloadSize > LHDC_MAX_SDU || input->PayloadSize != inLength - sizeof(*input)) { status = STATUS_INVALID_BUFFER_SIZE; goto fail; }
+            // Wake before the first post-idle AVDTP transaction. Media packets
+            // and idle receive polls do not issue ACL mode requests.
+            if (slot->Info.ChannelId == LHDC_CHANNEL_SIGNAL) {
+                status = WakeSignalLink(ctx, slot->Info.RemoteAddress);
+                if (!NT_SUCCESS(status)) goto fail;
+                WdfSpinLockAcquire(ctx->Lock);
+                channel = ctx->Ready && !ctx->SessionClosing && slot->Info.Connected ? slot->Handle : NULL;
+                WdfSpinLockRelease(ctx->Lock);
+                if (channel == NULL) { status = STATUS_CONNECTION_DISCONNECTED; goto fail; }
+                transfer->ChannelHandle = channel;
+            }
             transfer->TransferFlags = ACL_TRANSFER_DIRECTION_OUT;
             transfer->Buffer = (PUCHAR)input + sizeof(*input);
             transfer->BufferSize = input->PayloadSize;

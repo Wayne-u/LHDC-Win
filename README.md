@@ -1,10 +1,10 @@
 # Windows LHDC
 
-面向 Windows 11 22H2 及以后版本（构建号 22621+）的 x64 开发版本，目标耳机为 OPPO Enco X4。当前实机验证范围为 Windows 11 28000 和本机 Realtek；其他系统版本与蓝牙适配器尚未实测。
+面向 Windows 11 22H2 及以后版本（构建号 22621+）的 x64 LHDC V5 播放驱动与控制面板，目标耳机为 OPPO Enco X4。当前实机验证范围为 Windows 11 28000 和本机 Realtek；其他系统版本与蓝牙适配器尚未实测。
 
-当前已知问题：持续播放仍可能偶发卡顿，高码率下更明显；空闲恢复修复只通过离线检查，尚未安装实测。历史崩溃与连接问题的修复记录、长期稳定性边界见 [验证状态](docs/status.md)。
+0.8.6 提前准备音频配置，并在控制命令发送前主动唤醒低功耗链路。本机起播准备由约 1.5～1.65 秒降至 396～721 ms，用户确认听感改善；仍有唤醒等待，高码率偶发卡顿及安装后首次重连无声反馈尚未完全排除。合并后的版本说明见 [更新日志](CHANGELOG.md)，测试条件与稳定性边界见 [验证状态](docs/status.md)。
 
-预编译下载：[v0.8.5 测试版](https://github.com/Wayne-u/LHDC-Win/releases/tag/v0.8.5)。该版本仍使用测试签名驱动，运行前须满足现有测试模式和驱动加载条件。
+预编译下载：[v0.8.6 正式版本](https://github.com/Wayne-u/LHDC-Win/releases/tag/v0.8.6)。GitHub 按正式 Release 发布，驱动仍使用测试签名，运行前须满足现有测试模式和驱动加载条件。
 
 Windows 应用通过耳机的原生统一播放端点输出，后台服务将 WaveRT PCM 编码为 LHDC V5 并发送。面板选择驱动、采样率、位深和码率；Windows 管理播放、音量和通话路由。关闭面板不影响播放。
 
@@ -35,7 +35,7 @@ pwsh -NoProfile -File .\scripts\Sign-TestPackage.ps1 -Audio
 pwsh -NoProfile -File .\scripts\Build.ps1 -Target UI
 ```
 
-`Build.ps1` 构建后端、服务和部署工具，并运行九项 CTest。驱动单独使用 WDK 构建、InfVerif 和静态分析，签名脚本校验 SYS/CAT 签名及目录成员摘要。产物位于 `build/`。
+`Build.ps1` 构建后端、服务和部署工具，并运行十项 CTest。驱动单独使用 WDK 构建、InfVerif 和静态分析，签名脚本校验 SYS/CAT 签名及目录成员摘要。产物位于 `build/`。
 
 `Build.ps1 -Target UI` 调用发布入口生成完整应用目录 `build/app`。发布器从构建电脑上已安装的 PowerShell 7 x64 正式版复制完整运行时；自定义运行时目录可通过 `Publish.ps1 -PowerShellDirectory PATH` 指定。目标用户无需安装这些开发工具或运行库。
 
@@ -74,6 +74,7 @@ pwsh -NoProfile -File .\scripts\Build.ps1 -Target UI -Run
 | `third_party` | 固定版本的上游依赖与许可证 |
 
 - [架构](docs/architecture.md)：组件职责、缓冲、原生端点与通话。
+- [更新日志](CHANGELOG.md)：按版本合并的功能改动、验证结果和使用要求。
 - [验证指南](docs/testing.md)：可复现命令、测试边界和产物管理。
 - [验证状态](docs/status.md)：有效证据与未完成项。
 
@@ -87,11 +88,11 @@ pwsh -NoProfile -File .\scripts\Build.ps1 -Target UI -Run
 pwsh -NoProfile -File .\scripts\Publish.ps1
 ```
 
-生成 `build/LHDC-Win-0.8.5-win-x64-test.zip` 和对应 `.sha256`。ZIP 根目录包含 `LHDC-ControlPanel.exe`，以及 `backend`、`drivers`、`runtime/powershell`、`scripts`、`licenses`；解压完整目录后双击 EXE 即可打开面板。UI 自包含 .NET，原生后端使用静态 MSVC 运行库，PowerShell 使用包内运行时；无需用户预装 .NET、PowerShell 或 VC++ 运行库，也不依赖原工作区、用户名或当前工作目录。
+当前源码生成 `build/LHDC-Win-0.8.6-win-x64-test.zip` 和对应 `.sha256`，预编译包见上文下载链接；文件名中的 `test` 表示驱动使用测试签名。ZIP 根目录包含 `LHDC-ControlPanel.exe`，以及 `backend`、`drivers`、`runtime/powershell`、`scripts`、`licenses`；解压完整目录后双击 EXE 即可打开面板。UI 自包含 .NET，原生后端使用静态 MSVC 运行库，PowerShell 使用包内运行时；无需用户预装 .NET、PowerShell 或 VC++ 运行库，也不依赖原工作区、用户名或当前工作目录。
 
 发布器只收集四个后端程序、已验签的两类驱动包、测试公钥证书、部署脚本、运行时与许可证，不打包测试程序、调试符号、日志、私钥或部署恢复状态。`release.json` 记录版本、源码提交、工作区是否有未提交改动及依赖，`checksums.json` 记录逐文件 SHA256。`-NoArchive` 仅生成 `build/app`，适用于本地运行。
 
-需要保留现有 `build/app` 时，可传入 `-OutputDirectory build/app-0.8.5`，将新包写入独立目录；输出只允许 `build` 下的 `app` 或 `app-*` 目录。发布只生成文件，不自动更新正在运行的服务。
+需要保留现有 `build/app` 时，可传入 `-OutputDirectory build/app-0.8.6`，将新包写入独立目录；输出只允许 `build` 下的 `app` 或 `app-*` 目录。发布只生成文件，不自动更新正在运行的服务。
 
 驱动安装继续使用现有测试模式流程，首次应用需要管理员授权，测试模式及原有加载条件须事先满足；本包不会自动修改启动配置、Secure Boot 或内存完整性设置。部署子进程使用进程级执行策略运行随包脚本，不更改机器或用户的 PowerShell 执行策略。目标电脑先通过 Windows 配对 Enco X4，再在面板应用驱动。面板与部署日志写入用户 LocalAppData，服务及恢复状态使用系统 ProgramData。蓝牙传输使用微软协议栈，多个匹配的耳机 Audio Sink 实例仍明确报错。此包为测试签名驱动发行包，其他系统构建与蓝牙型号仍需实测。
 

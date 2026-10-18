@@ -94,11 +94,20 @@ int main() {
             return av::Bytes{};
         },3,caps);
         rejects([&]{stream.start();},"Start before configuration");
-        stream.configure(); stream.open();
+        stream.configure();
+        require(stream.state()==av::StreamState::configured &&
+            steps==std::vector<av::Signal>{av::Signal::set_configuration,av::Signal::get_configuration},
+            "Prepared idle stream must verify its configuration without Open or Start");
+        stream.open();
         rejects([&]{stream.start();},"Start before media L2CAP");
         stream.media_ready(); stream.start(); stream.suspend(); stream.close();
         require(steps==std::vector<av::Signal>{av::Signal::set_configuration,av::Signal::get_configuration,av::Signal::open,av::Signal::start,av::Signal::suspend,av::Signal::close},"AVDTP playback transaction order");
         require(stream.state()==av::StreamState::idle,"Normal close releases configuration");
+        steps.clear();
+        stream.configure(); stream.abort();
+        require(stream.state()==av::StreamState::idle &&
+            steps==std::vector<av::Signal>{av::Signal::set_configuration,av::Signal::get_configuration,av::Signal::abort},
+            "A changed idle configuration must be releasable before any media channel opens");
         steps.clear();
         av::Stream mismatch([&](av::Signal signal,const av::Bytes&) {
             steps.push_back(signal);

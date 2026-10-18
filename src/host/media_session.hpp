@@ -16,7 +16,10 @@ public:
     ~MediaSession();
     MediaSession(const MediaSession&)=delete;
     void discover();
+    void poll_idle();
+    bool configured_for(Profile profile) const;
     void configure(Profile profile);
+    void open_media();
     const avdtp::Bytes& peer_capabilities() const { return peer_caps_; }
     void start(std::uint32_t block_samples);
     void check();

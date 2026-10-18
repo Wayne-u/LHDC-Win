@@ -86,7 +86,9 @@ PCM 丢弃同时按采样帧记录间断；原始浮点 PCM 和转换后整数 P
 
 超过 100 ms 的发送记录 `submit_us`、`io_wait_us`、`completion_us`，周期和结束记录保存阶段最大值、读取间隔及队列峰值。异步窗口下，提交计时属于本次新包，等待及完成计时属于回收的最早包；不能把一次调用耗时当成单包端到端延迟。用户态等待还包含重新获得调度的时间，不能单凭它区分控制器、无线重传或耳机流控。进度日志在线程中写出，磁盘阻塞时合并快照。
 
-驱动 WPP 记录媒体请求的提交、完成、字节数和未完成请求数，可按请求地址配对测量驱动内延迟。ACL 模式仅在启用对应追踪时查询，日常播放不额外发送查询 BRB。控制器发送额度和 HCI 完成事件由 Windows BthPort ETW 另行采集；完成计数不证明无线端没有重传或缺损。
+驱动 WPP 记录媒体请求的提交、完成、字节数和未完成请求数，可按请求地址配对测量驱动内延迟。媒体建连前后的诊断模式查询只在启用对应追踪时执行，日常媒体包不额外发送查询 BRB。控制器发送额度和 HCI 完成事件由 Windows BthPort ETW 另行采集；完成计数不证明无线端没有重传或缺损。
+
+传输驱动在合法信令发送前通过 `BRB_ACL_GET_MODE` 查询模式，非 Active／EnterActive 时请求 `BRB_ACL_ENTER_ACTIVE_MODE`，成功后重新核验通道仍连接再发送 AVDTP。I/O 状态和 BRB 完成状态均须成功，错误保留原有回收路径。该查询只在信令发送执行，不放入媒体包、AVRCP 或空闲接收循环；不依赖开启 WPP，也不更改系统全局电源策略。WPP 中记录唤醒前模式、请求结果和耗时，媒体建立前后的诊断模式查询仍只在开启追踪时执行。
 
 ## 音量与通话
 
@@ -106,7 +108,9 @@ Windows 原生统一端点负责 HFP 路由及所需的 16 kHz 单声道转换�
 
 服务完成 Discover、能力交集、SetConfiguration/GetConfiguration、Open、Start 与结束回收。媒体首选 MTU 为 4096 字节，实际值以蓝牙协商结果为准，本机 Enco X4 当前返回 679 字节；RTP/LHDC 头占 14 字节。信令与 AVRCP 保留默认 MTU 偏好。AVRCP 50 ms 接收超时只取消当前读，不取消媒体发送；原生 AVRCP 目标端与 HFP 设备保留。
 
-空闲等待仅保留 AVRCP 音量和按键控制；实际 WaveRT 进入运行状态后，才按该次播放的格式发现并建立 AVDTP／媒体通道，避免把未监听信令的 Open 状态带过长时间空闲。Start 前后核验 PCM Epoch 和运行状态，发现协商期间停止或换流时回收本次会话，避免继续按旧代次处理新播放。`direct_audio_prepare` 与 `media_startup_complete` 记录起播代次、协商耗时及起播前的缓冲／内核丢弃。重新协商仍需时间，已有的过期起播数据清理策略不保证短提示音的开头完整；Windows 持续输出静音且保持 Running 时，也不会触发空闲等待。
+0.8.6 在空闲阶段完成 SDP／AVDTP 能力发现、更新能力缓存，按用户设置执行 SetConfiguration／GetConfiguration，并保留 AVRCP 音量和按键控制。服务线程以 5 ms 初始接收期限处理空闲信令，只忽略没有开始消息的接收超时；已经开始的分片消息必须收齐，分片中途超时使会话失败并回收，不能丢掉半条消息后继续协商。收到真实 Running 后按该次格式核对配置；相同则复用，不同则先 Abort 旧配置再配置和校验。仅此时才 Open 媒体通道，Start 完成后将唯一信令读者交给流监听线程，避免与事务响应竞争。媒体通道不长期空闲，连接错误后仍重建会话；对端 Close／Abort 已接受时不再重复 Abort，对端 Suspend 仍需清理配置。
+
+Start 前后核验 PCM Epoch 和运行状态，发现协商期间停止或换流时回收本次会话。`media_control_ready` 记录提前准备耗时和 `configuration_prepared`；`direct_audio_prepare` 记录空闲时长；`media_startup_complete` 分别记录配置／打开、Start 前准备、Start 事务、起播缓冲／内核丢弃、是否请求重置和 `configuration_reused`。预缓冲仍为 20 ms，超过 100 ms 起播积压或发生内核溢出时的原有清理策略保留，不能用扩大缓冲掩盖剩余建连耗时。冷连接、实际格式变化和媒体建连仍需时间，本实现不保证短提示音开头完整；Windows 持续输出静音且保持 Running 时，也不会触发空闲等待。
 
 `Set-AudioMode.ps1` 校验签名、目录成员和目标实例，仅操作自动发现的目标耳机。恢复 Windows 时停止并禁用服务、移除子设备、恢复 `BthA2dp / microsoft_bluetooth_a2dp_src.inf` 及原生访问权限/SRC 接口，然后核验双声道端点。部署状态位于 `%ProgramData%\LHDC-Win\deployment.json`，不依赖测试日志。
 

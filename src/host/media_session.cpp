@@ -4,6 +4,7 @@
 #include <iostream>
 #include <syncstream>
 #include <algorithm>
+#include <chrono>
 namespace av=lhdc::avdtp;
 namespace lhdc {
 constexpr DWORD media_send_timeout_ms=500;
@@ -32,17 +33,40 @@ void MediaSession::discover() {
     }
     if (!remote_seid_) throw std::runtime_error("No available LHDC V5 endpoint");
 }
+bool MediaSession::configured_for(Profile profile) const {
+    return stream_ && stream_->state()==av::StreamState::configured &&
+        profile.sample_rate==profile_.sample_rate && profile.bits==profile_.bits && profile.kbps==profile_.kbps;
+}
 void MediaSession::configure(Profile profile) {
+    if (configured_for(profile)) return;
     const auto selected=av::select_configuration(peer_caps_,profile);
+    if (stream_) {
+        if (stream_->state()!=av::StreamState::configured) throw std::logic_error("Configuration changes require a closed media channel");
+        stream_->abort(); protocol_.set_configuration({}); stream_.reset();
+    }
     profile_=profile; protocol_.set_profile(profile);
     stream_.emplace([&](av::Signal signal,const av::Bytes& payload){return protocol_.accept(signal,payload);},remote_seid_,selected);
     stream_->configure(); protocol_.set_configuration(selected);
     std::osyncstream(std::cout) << "{\"event\":\"configuration_verified\",\"seid\":" << unsigned(remote_seid_) << ",\"raw\":" << json_string(av::hex(selected))
         << ",\"sample_rate\":" << profile_.sample_rate << ",\"bits\":" << profile_.bits << ",\"target_kbps\":" << profile_.kbps << ",\"stream_started\":false}\n";
-    stream_->open(); transport_.open(LHDC_CHANNEL_MEDIA);
+}
+void MediaSession::open_media() {
+    if (!stream_) throw std::logic_error("Media Open requires a configured stream");
+    stream_->open();
+    std::osyncstream(std::cout)<<"{\"event\":\"media_channel_open_begin\",\"channel_id\":2}"<<std::endl;
+    const auto opening=std::chrono::steady_clock::now();
+    transport_.open(LHDC_CHANNEL_MEDIA);
     media_info_=transport_.info(LHDC_CHANNEL_MEDIA);
-    std::osyncstream(std::cout) << "{\"event\":\"media_channel_open\",\"channel_id\":2,\"in_mtu\":" << media_info_.InMtu << ",\"out_mtu\":" << media_info_.OutMtu << "}\n";
+    const auto opened=std::chrono::steady_clock::now();
+    std::osyncstream(std::cout) << "{\"event\":\"media_channel_open\",\"channel_id\":2,\"in_mtu\":" << media_info_.InMtu << ",\"out_mtu\":" << media_info_.OutMtu
+        <<",\"elapsed_us\":"<<std::chrono::duration_cast<std::chrono::microseconds>(opened-opening).count()<<"}"<<std::endl;
     if (media_info_.OutMtu<=media_header_bytes) throw std::runtime_error("Media channel MTU is smaller than media headers");
+}
+void MediaSession::poll_idle() {
+    check();
+    // The service thread owns reads until Start; the streaming monitor takes
+    // over afterwards. No background reader may race a configuration exchange.
+    protocol_.poll_peer(5);
 }
 void MediaSession::start(std::uint32_t block_samples) {
     stream_->media_ready(); stream_->start();
@@ -54,7 +78,6 @@ void MediaSession::start(std::uint32_t block_samples) {
                 try { protocol_.poll_peer(); }
                 catch (const WindowsError& error) {
                     if (stop_.load() && error.code==ERROR_OPERATION_ABORTED) break;
-                    if (error.code==ERROR_SEM_TIMEOUT || error.code==ERROR_TIMEOUT) continue;
                     throw;
                 }
             }
@@ -126,7 +149,7 @@ MediaSession::~MediaSession() {
     if (monitor_error_) {
         try { std::rethrow_exception(monitor_error_); } catch (const std::exception& error) { cleanup_error("signalling_monitor_failed",error); }
     }
-    if (stream_) {
+    if (stream_ && !protocol_.peer_released()) {
         try { stream_->abort(); } catch (const std::exception& error) { cleanup_error("abort_failed",error); }
     }
     for (const auto channel:{LHDC_CHANNEL_MEDIA,LHDC_CHANNEL_SIGNAL}) {

@@ -41,9 +41,21 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,const HfpActivity& hfp)
     AudioTask priority; Pacer pacer;
     auto quality=profile;
     const auto revision=capability_revision();
-    // Keep AVRCP available for volume and Play while idle. AVDTP and its media
-    // channel belong to an actual render stream, not an unmonitored idle wait.
+    // Prepare and verify the requested codec while idle. Keep one signal
+    // reader, and open media only after an actual render stream arrives.
+    const auto control_started=std::chrono::steady_clock::now();
     MediaSession session(target_device().address,profile);
+    session.discover();
+    const auto& caps=session.peer_capabilities();
+    const auto saved=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilities",REG_BINARY,caps.data(),static_cast<DWORD>(caps.size()));
+    if (saved!=ERROR_SUCCESS) throw std::runtime_error("Peer capability cache write failed, Win32="+std::to_string(saved));
+    const auto saved_revision=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilityRevision",REG_DWORD,&revision,sizeof(revision));
+    if(saved_revision!=ERROR_SUCCESS) throw WindowsError("Peer capability revision write",saved_revision);
+    session.configure(profile);
+    const auto control_ready=std::chrono::steady_clock::now();
+    const auto control_ms=std::chrono::duration_cast<std::chrono::milliseconds>(control_ready-control_started).count();
+    std::osyncstream(std::cout)<<"{\"event\":\"media_control_ready\",\"prepare_ms\":"<<control_ms
+        <<",\"configuration_prepared\":true,\"sample_rate\":"<<profile.sample_rate<<",\"bits\":"<<profile.bits<<",\"target_kbps\":"<<profile.kbps<<"}"<<std::endl;
     LHDC_PCM_STATE state{};
     auto next_hfp_check=std::chrono::steady_clock::now();
     while (!stopped(stop)) {
@@ -55,24 +67,22 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,const HfpActivity& hfp)
             if(hfp.active() || !bluetooth_connected(target_device().address)) return;
             next_hfp_check=std::chrono::steady_clock::now()+std::chrono::milliseconds(100);
         }
-        if (WaitForSingleObject(stop,5)==WAIT_OBJECT_0) return;
+        session.poll_idle();
     }
     if (stopped(stop)) return;
     session.check();
     if (state.Channels!=2 || state.BlockAlign!=2*(state.Bits/8)) throw std::runtime_error("Direct PCM requires interleaved stereo");
-    // Idle format probes do not select the codec. Use this render epoch's
-    // format and reject a stopped/replaced stream after Bluetooth negotiation.
+    // Prepare from the user's requested format, not transient idle probes.
+    // Reconfigure if this render epoch actually requires a different codec.
     profile=follow_pcm(quality,state.SampleRate,state.Bits,state.FloatingPoint!=0);
     const auto preparing=std::chrono::steady_clock::now();
     std::osyncstream(std::cout)<<"{\"event\":\"direct_audio_prepare\",\"epoch\":"<<state.Epoch
-        <<",\"input_sample_rate\":"<<state.SampleRate<<",\"input_bits\":"<<state.Bits<<"}"<<std::endl;
-    session.discover();
-    const auto& caps=session.peer_capabilities();
-    const auto saved=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilities",REG_BINARY,caps.data(),static_cast<DWORD>(caps.size()));
-    if (saved!=ERROR_SUCCESS) throw std::runtime_error("Peer capability cache write failed, Win32="+std::to_string(saved));
-    const auto saved_revision=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilityRevision",REG_DWORD,&revision,sizeof(revision));
-    if(saved_revision!=ERROR_SUCCESS) throw WindowsError("Peer capability revision write",saved_revision);
+        <<",\"input_sample_rate\":"<<state.SampleRate<<",\"input_bits\":"<<state.Bits
+        <<",\"idle_ms\":"<<std::chrono::duration_cast<std::chrono::milliseconds>(preparing-control_ready).count()<<"}"<<std::endl;
+    const bool configuration_reused=session.configured_for(profile);
     session.configure(profile);
+    session.open_media();
+    const auto configured_at=std::chrono::steady_clock::now();
     const auto media_mtu=session.media_info().OutMtu;
     const auto saved_mtu=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerMediaMtu",REG_DWORD,&media_mtu,sizeof(media_mtu));
     if(saved_mtu!=ERROR_SUCCESS) throw WindowsError("Media MTU cache write",saved_mtu);
@@ -89,15 +99,24 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,const HfpActivity& hfp)
     const auto configured=pcm.state();
     if(stopped(stop) || !configured.Running || configured.Epoch!=state.Epoch || hfp.active() ||
         !same(quality,service_profile()) || revision!=capability_revision()) return;
+    const auto start_requested_at=std::chrono::steady_clock::now();
     session.start(encoder.block_samples());
+    const auto stream_started_at=std::chrono::steady_clock::now();
     // Preserve the beginning of a newly started render stream. Discard only
     // stale backlog accumulated while negotiating or restarting the encoder.
     const auto pending=pcm.state();
     if(!pending.Running || pending.Epoch!=state.Epoch) return;
+    const bool reset_startup=pending.DroppedBytes || pending.BufferedBytes>static_cast<std::uint64_t>(pending.SampleRate)*pending.BlockAlign/10;
     std::osyncstream(std::cout)<<"{\"event\":\"media_startup_complete\",\"epoch\":"<<state.Epoch
         <<",\"setup_ms\":"<<std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-preparing).count()
+        <<",\"control_prepare_ms\":"<<control_ms
+        <<",\"configuration_reused\":"<<(configuration_reused?"true":"false")
+        <<",\"configure_ms\":"<<std::chrono::duration_cast<std::chrono::milliseconds>(configured_at-preparing).count()
+        <<",\"pre_start_ms\":"<<std::chrono::duration_cast<std::chrono::milliseconds>(start_requested_at-configured_at).count()
+        <<",\"start_ms\":"<<std::chrono::duration_cast<std::chrono::milliseconds>(stream_started_at-start_requested_at).count()
+        <<",\"startup_reset_requested\":"<<(reset_startup?"true":"false")
         <<",\"buffered_bytes\":"<<pending.BufferedBytes<<",\"kernel_dropped_bytes\":"<<pending.DroppedBytes<<"}"<<std::endl;
-    if (pending.DroppedBytes || pending.BufferedBytes>static_cast<std::uint64_t>(pending.SampleRate)*pending.BlockAlign/10) pcm.reset();
+    if (reset_startup) pcm.reset();
     PcmReader reader([&](std::size_t count){return pcm.read(count);},[&]{pcm.reset();},state,profile);
     auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
     auto started=std::chrono::steady_clock::now();
