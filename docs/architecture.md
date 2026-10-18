@@ -7,7 +7,7 @@ flowchart LR
     App[Windows 应用] --> Endpoint[Windows 原生统一耳机端点]
     Endpoint --> WaveRT[WaveRT / 200 ms PCM 缓冲]
     WaveRT --> Reader[独立读取线程]
-    Reader --> Queue[250 ms 有界队列]
+    Reader --> Queue[120 ms 有界队列 / 丢弃过时 PCM]
     Queue --> Encode[LHDC V5 / RTP]
     Encode --> Transport[KMDF 蓝牙传输]
     Transport --> Earbuds[Enco X4]
@@ -22,6 +22,10 @@ flowchart LR
 `lhdc-transport.sys` 绑定目标 Audio Sink，枚举 `LHDCWIN\Audio` 子设备；`lhdc-audio.sys`（服务名 `lhdc-render`）提供 PortCls/WaveRT 播放路径。子设备继承真实蓝牙 ContainerId，拓扑使用 `KSNODETYPE_HEADPHONES`；内部 `WaveSpeaker`/`TopologySpeaker` 名称保留 KS 通道标识。没有 ROOT 声卡、模拟麦克风、回环或文件录音，受保护内容不导出。
 
 音频框架由固定版本的 Microsoft SimpleAudioSample 在 `build/audio-reference` 准备单一播放路径，上游依赖保持原样。
+
+拓扑支持插拔检测：服务根据实际蓝牙 ACL 状态写入私有连接属性，驱动更新 `KSJACK_DESCRIPTION.IsConnected` 并发送 `KSEVENT_PINCAPS_JACKINFOCHANGE`，使入盒后的播放端点成为未插入状态。`KSPROPERTY_JACK_CONTAINERID` 返回音频子设备继承的蓝牙 ContainerId，避免动态插拔后 Windows 为播放端点生成独立的设备归组。部署时先同步连接状态，再核验播放格式、设备归组和客户端可用性。
+
+音频子设备使用 KMDF 动态子设备列表，服务通过传输 IOCTL 同步其存在状态：蓝牙断开时报告子设备缺失，重连时按相同硬件 ID 和 `Audio0` 实例重新枚举。这样 Windows 不会因一块常驻的 LHDC 音频适配器而把耳机显示为仍然连接。尚未连接时，部署记录音频验证待完成状态。
 
 生命周期修复：WaveRT miniport 持有适配器引用，音频流持有 miniport 引用；流析构先删除并等待通知定时器，再释放 miniport。PnP 清理同步解除适配器的 ETW 端口引用，再清空子设备缓存，避免循环引用。ETW 回调与接口替换通过旋转锁互斥。该修复对应 2026-10-09 内核崩溃，已安装并完成一分钟播放复测，长期稳定性与 PnP 生命周期仍需验证，见 [验证状态](status.md)。
 
@@ -49,9 +53,11 @@ Hi-Res 关闭时耳机的 AVDTP 能力为 `0100070d00ff3a050000354c3016114000`�
 
 固定模式在完整编码包边界调用编码器的运行时码率接口，保持编码器、AVDTP 会话及 RTP 时序。新码率必须处于当前协商上下限内且单帧适合媒体 MTU，否则重新协商。例如 1000 kbps 建连后可直接切换 500/900/1000；400 kbps 建连后的上调需要重建会话。
 
+若当前会话已经发生 PCM 丢弃或长发送停顿，手动降低码率上限会先关闭并重建媒体会话，避免继续沿用拥塞后的接收状态。正常无拥塞调整保留实时切换。播放器暂停不一定让 WaveRT 停止：Windows 仍可提供静音 PCM，因此不能依赖短暂停顿来清除媒体会话状态。
+
 `AdaptiveBitrate` 为独立的 REG_DWORD 开关（0/1），默认关闭；`Profile` 始终保存用户选择的上限，`ActiveBitrate` 发布实际播放码率，非播放状态清零。自适应使用当前编码表内、400 kbps 至所选上限的档位，起始最高 500 kbps（44.1 kHz 为 480）；上限不高于 400 时保持所选值。仅改变码率，不改变采样格式或扩大缓冲。
 
-控制器每 100 ms 联合观察 PCM 积压与未完成发送的等待时间。PCM 达到 120 ms，或发送等待达到 40 ms 且 PCM 超过 80 ms，连续三次才降一档。PCM 达到 180 ms、出现新的丢弃，或发送等待达到 100 ms 且 PCM 超过 80 ms，视为严重拥塞：高档直接降至不高于 500 kbps 的实际档位，持续拥塞再降至 400。正常 60 ms 预缓冲、没有 PCM 积压的孤立发送延迟不触发降档。
+控制器每 100 ms 联合观察 PCM 积压与未完成发送的等待时间。PCM 达到 90 ms，或发送等待达到 40 ms 且 PCM 超过 80 ms，连续三次才降一档。PCM 达到 110 ms、出现新的丢弃，或发送等待达到 100 ms 且 PCM 超过 80 ms，视为严重拥塞：高档直接降至不高于 500 kbps 的实际档位，持续拥塞再降至 400。正常 20 ms 起播预缓冲、恢复时保留的 60 ms PCM，以及没有 PCM 积压的孤立发送延迟不触发降档。
 
 发送反馈保留两次判断之间的等待峰值；已经完成但尚未从四包窗口回收的请求不计为拥塞。队列不高于 80 ms 持续 15 秒才升一档，降档后至少等待 30 秒再升档。变化在完整包边界应用并记录，不改变用户上限或采样格式。判断仍在发送返回后执行，不能撤回在途请求或消除已经发生的丢弃，也不能保证低于 400 kbps 所需吞吐的链路持续出声。
 
@@ -70,7 +76,9 @@ Hi-Res 关闭时耳机的 AVDTP 能力为 `0100070d00ff3a050000354c3016114000`�
 
 ## 缓冲与发送
 
-起播正常预缓冲为 60 ms，每次读取最多 20 ms。独立读取线程负责 WaveRT 读取、PCM 表示转换和源重置，发送线程消费 250 ms 有界用户态队列，媒体 I/O 等待不直接阻塞读取。队列满时等待空间，由 200 ms 内核缓冲承接后续数据；空源使用高精度计时器轮询。读取错误传回消费者，格式代次变化停止读取，退出唤醒并回收等待线程。
+起播正常预缓冲为 20 ms，每次读取最多 20 ms。独立读取线程持续排空 WaveRT，不因媒体发送等待而停止捕获；用户队列超过 120 ms 时保留最新约 60 ms，丢弃旧 PCM 并计数。内核已经积压或溢出时，同时清空旧用户队列并重置源。恢复后发送时基按当前时间重建，避免突发补发；媒体请求从提交起最多等待 500 ms，超时后取消请求并由服务重建链路。自适应提前在 90/110 ms 判断持续／紧急压力，失败档位的重试间隔从 60 秒逐次翻倍至 15 分钟，降低反复试探不可用码率造成的卡顿。上述边界不包括 Windows、控制器和耳机内部缓冲，不能视作端到端延迟保证。读取错误传回消费者，格式代次变化停止读取，退出回收读取线程。
+
+PCM 丢弃同时按采样帧记录间断；原始浮点 PCM 和转换后整数 PCM 分别用各自的块对齐换算，不混用字节数。消费者在取块时原子获取累计丢弃帧数，发现间断后清理编码器的未完成包，并让 RTP 时间戳跳过全部未发送样本；RTP 与 LHDC 序号仍只按实际发送包递增。`timeline_skipped_samples` 记录跳过的样本时间，`encoder_discarded_pcm_bytes_total` 单独记录编码器半包丢弃并计入总丢弃。时间线修复不重置自适应控制器的退避状态。
 
 启动或溢出恢复后追赶超过正常预缓冲的积压。超过两级缓冲容量的停顿仍会溢出，此时保留连接、编码器和 RTP，清理过期数据并恢复节拍。统计区分驱动丢弃 `kernel_dropped_bytes_total` 与重置主动丢弃 `discarded_pcm_bytes_total`，总和为 `dropped_bytes_total`。起播协商按现有策略清理过期数据，运行期零丢弃不证明全部起播样本都到达耳机。
 
@@ -84,6 +92,8 @@ Hi-Res 关闭时耳机的 AVDTP 能力为 `0100070d00ff3a050000354c3016114000`�
 
 Windows 硬件主音量/静音通过 AVRCP SetAbsoluteVolume 同步耳机；PCM 主增益为 1，耳机执行主音量衰减，应用音量仍由 Windows 管理。VolumeChanged 回写 Windows。起播读取耳机当前增益，重连不重复设置相同值，控制失败不静默切到满音量。
 
+本机原生 AVRCP 控制器端（0x110E）会在重连后抢先占用 AVCTP 通道，使 LHDC 打开请求返回 `STATUS_REQUEST_NOT_ACCEPTED`。LHDC 模式只停用目标耳机的这一端，由工作进程接管音量与播放、暂停、停止、上下首等按键；按键转换为当前桌面的 Windows 媒体命令。原生 AVRCP 目标端和 HFP 保留。原始启用状态保存在受保护的 `%ProgramData%\LHDC-Win\native-avrcp.json`，恢复 Windows 模式时还原；服务在建立 LHDC 会话前再次检查控制器所有权。
+
 Windows 原生统一端点负责 HFP 路由及所需的 16 kHz 单声道转换。麦克风使用期间工作进程暂停 LHDC，结束后重建音乐传输。原生麦克风保持启用，项目不再向独立 HFP 输出转送音乐。
 
 麦克风不连续标记与设备帧位置缺口分别记录；标记不直接等同于可听丢音，帧位置连续也不能排除底层补偿或无线缺损。当前对照与 ETW 结论见 [验证状态](status.md)。
@@ -94,8 +104,18 @@ Windows 原生统一端点负责 HFP 路由及所需的 16 kHz 单声道转换�
 
 传输 ABI v3 位于 `include/lhdc_transport.h`。信令、媒体、AVRCP 的 ChannelId 为 1、2、3，各有独立队列，避免控制空读阻塞媒体。信令和 AVRCP 保持顺序队列；媒体最多四个 BRB 在途，队列级同步串行执行提交回调，完成回调通过状态锁更新计数。打开与关闭拒绝未完成的同通道操作。SDP 校验 Audio Sink 的 PSM 0x0019/AVDTP 与 AVRCP Target 的 PSM 0x0017；媒体要求信令已建立，AVRCP 可独立建连，回收顺序为 AVRCP、媒体、信令。
 
-服务完成 Discover、能力交集、SetConfiguration/GetConfiguration、Open、Start 与结束回收。媒体首选 MTU 为 4096 字节，实际值以蓝牙协商结果为准，本机 Enco X4 当前返回 679 字节；RTP/LHDC 头占 14 字节。信令与 AVRCP 保留默认 MTU 偏好。AVRCP 50 ms 接收超时只取消当前读，不取消媒体发送；微软 AVRCP 与 HFP 设备保留。
+服务完成 Discover、能力交集、SetConfiguration/GetConfiguration、Open、Start 与结束回收。媒体首选 MTU 为 4096 字节，实际值以蓝牙协商结果为准，本机 Enco X4 当前返回 679 字节；RTP/LHDC 头占 14 字节。信令与 AVRCP 保留默认 MTU 偏好。AVRCP 50 ms 接收超时只取消当前读，不取消媒体发送；原生 AVRCP 目标端与 HFP 设备保留。
+
+空闲等待仅保留 AVRCP 音量和按键控制；实际 WaveRT 进入运行状态后，才按该次播放的格式发现并建立 AVDTP／媒体通道，避免把未监听信令的 Open 状态带过长时间空闲。Start 前后核验 PCM Epoch 和运行状态，发现协商期间停止或换流时回收本次会话，避免继续按旧代次处理新播放。`direct_audio_prepare` 与 `media_startup_complete` 记录起播代次、协商耗时及起播前的缓冲／内核丢弃。重新协商仍需时间，已有的过期起播数据清理策略不保证短提示音的开头完整；Windows 持续输出静音且保持 Running 时，也不会触发空闲等待。
 
 `Set-AudioMode.ps1` 校验签名、目录成员和目标实例，仅操作自动发现的目标耳机。恢复 Windows 时停止并禁用服务、移除子设备、恢复 `BthA2dp / microsoft_bluetooth_a2dp_src.inf` 及原生访问权限/SRC 接口，然后核验双声道端点。部署状态位于 `%ProgramData%\LHDC-Win\deployment.json`，不依赖测试日志。
 
 后台日志位于 `%ProgramData%\LHDC-Win\service.jsonl`，面板日志位于 `%LOCALAPPDATA%\LHDC-Win`。传输 WPP provider 为 `{67A00BC6-98CB-4A32-9CB0-50C97716C708}`，PDB/TMF 位于对应驱动构建目录。
+
+发布包以面板 EXE 所在目录为应用根目录，后端固定在 `backend`，两类驱动在 `drivers/transport` 和 `drivers/audio`，PowerShell 固定在 `runtime/powershell`。UI 使用 win-x64 自包含单文件发布并保留完整 WPF，不裁剪；用户态 C/C++ 统一使用静态 MSVC 运行库。开发和发布入口共用同一应用目录结构，不探测开发电脑的路径或 PowerShell 注册表。部署脚本显式接收 `PackageRoot`，日志写入 `%LOCALAPPDATA%/LHDC-Win/deployment`；服务通过 `FOLDERID_ProgramData` 获取日志根目录。
+
+`Publish.ps1` 构建不含测试目标的后端、发布 UI、检查原生 DLL 依赖、验证两类测试签名包，收集完整 PowerShell 运行时与许可证，再生成版本清单、逐文件摘要及 ZIP 摘要。包内仅包含测试公钥；驱动加载、证书信任与恢复仍使用原有测试模式流程。蓝牙诊断枚举 `GUID_BTHPORT_DEVICE_INTERFACE`，连接查询逐个检查适配器并优先采用连接中的目标记录；没有连接时保留已知配对信息。枚举和适配器句柄在成功、未找到及错误路径中均释放。
+
+两个驱动均使用 KMDF 1.33、Windows 11 22H2 的 NTDDI 目标和构建号 22621 的 INF 门槛；CAT 覆盖 NI/GE x64。最低目标由音频格式刷新所需的 `KSPROPERTY_JACK_DESCRIPTION3` 确定，构建仍使用 SDK/WDK 28000。该基线是构建与接口要求，其他 Windows 版本和控制器的实机兼容性另行验证。
+
+耳机与通话端点初始化在连接重试循环内进行，开机时蓝牙设备尚未枚举不会让工作进程退出；断开或传输错误后释放旧通话监视对象，在重连时重建。工作进程意外退出或启动失败会记录 `audio_worker_error`，监督服务等待一秒后重新创建工作进程，停止事件可中断等待。

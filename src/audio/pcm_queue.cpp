@@ -28,4 +28,11 @@ bool PcmQueue::pop(std::span<std::uint8_t> pcm) {
     stats_.queued-=pcm.size(); stats_.popped+=pcm.size();
     return true;
 }
+std::size_t PcmQueue::trim(std::size_t retained_bytes) {
+    if (retained_bytes%frame_bytes_) throw std::invalid_argument("PCM queue trim must retain whole frames");
+    const auto discarded=stats_.queued>retained_bytes ? stats_.queued-retained_bytes : 0;
+    read_=(read_+discarded)%buffer_.size();
+    stats_.queued-=discarded;
+    return discarded;
+}
 }

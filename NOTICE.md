@@ -8,6 +8,8 @@ The following components retain their own licenses:
 | `third_party/lhdcv5` | [Apache-2.0](licenses/Apache-2.0.txt) | WillyBilly06 / LHDC-V5-Encoder, revision `3f9d1980fa9c57cdfb78792f9455a7dbac50edda` |
 | `third_party/windows-driver-samples` | [MS-PL](licenses/MS-PL.txt) | Copyright (c) Microsoft Corporation, revision `2dc3fd3a0cc84a2933f2194e7ec0871584979071` |
 | `drivers/audio/minipairs.h`, `drivers/audio/speakerwavtable.h` | [MS-PL](licenses/MS-PL.txt) | Modified from Microsoft SimpleAudioSample; original copyright notices retained |
+| Bundled PowerShell runtime | MIT and bundled third-party licenses | Microsoft PowerShell 7; complete runtime copied from the publisher's selected x64 distribution, including LICENSE and ThirdPartyNotices |
+| Self-contained .NET and Windows Desktop runtimes | MIT and bundled third-party licenses | Microsoft .NET runtime packs selected by the SDK; original license and notice files are included under `licenses/` in the published package |
 
 `scripts/Build.ps1 -Target Audio` prepares a modified SimpleAudioSample framework
 under the ignored `build/audio-reference` directory. That framework retains

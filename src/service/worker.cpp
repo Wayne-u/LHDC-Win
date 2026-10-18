@@ -1,6 +1,7 @@
 #include "worker.hpp"
 #include "audio/windows_audio.hpp"
 #include "transport/windows.hpp"
+#include "host/json.hpp"
 #include <sddl.h>
 #include <array>
 #include <filesystem>
@@ -56,6 +57,7 @@ public:
         const std::filesystem::path executable(path.data());
         auto command=L"\""+executable.wstring()+L"\" worker \""+event+L"\"";
         STARTUPINFOW startup{};startup.cb=sizeof(startup);
+        startup.lpDesktop=const_cast<LPWSTR>(L"winsta0\\default");
         startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_HIDE;
         check(CreateProcessAsUserW(token.get(),executable.c_str(),command.data(),nullptr,nullptr,FALSE,
             CREATE_SUSPENDED|CREATE_NO_WINDOW,nullptr,executable.parent_path().c_str(),&startup,&process_),"Audio worker launch");
@@ -87,18 +89,23 @@ void supervise_audio(HANDLE stop) {
     while(WaitForSingleObject(stop,0)==WAIT_TIMEOUT) {
         const auto session=WTSGetActiveConsoleSessionId();
         if(session==0xFFFFFFFF) { if(WaitForSingleObject(stop,500)==WAIT_OBJECT_0) break;continue; }
-        StopEvent event;
-        Worker worker(session,event.name);
-        const HANDLE handles[]={stop,worker.process()};
-        for(;;) {
-            const auto result=WaitForMultipleObjects(2,handles,FALSE,500);
-            if(result==WAIT_OBJECT_0) { worker.stop(event.handle);return; }
-            if(result==WAIT_OBJECT_0+1) {
-                DWORD code=0;check(GetExitCodeProcess(worker.process(),&code),"Audio worker result");
-                throw std::runtime_error("Audio worker exited unexpectedly, code="+std::to_string(code));
+        try {
+            StopEvent event;
+            Worker worker(session,event.name);
+            const HANDLE handles[]={stop,worker.process()};
+            for(;;) {
+                const auto result=WaitForMultipleObjects(2,handles,FALSE,500);
+                if(result==WAIT_OBJECT_0) { worker.stop(event.handle);return; }
+                if(result==WAIT_OBJECT_0+1) {
+                    DWORD code=0;check(GetExitCodeProcess(worker.process(),&code),"Audio worker result");
+                    throw std::runtime_error("Audio worker exited unexpectedly, code="+std::to_string(code));
+                }
+                if(result!=WAIT_TIMEOUT) throw WindowsError("Audio worker supervision wait",GetLastError());
+                if(WTSGetActiveConsoleSessionId()!=session) { worker.stop(event.handle);break; }
             }
-            if(result!=WAIT_TIMEOUT) throw WindowsError("Audio worker supervision wait",GetLastError());
-            if(WTSGetActiveConsoleSessionId()!=session) { worker.stop(event.handle);break; }
+        } catch (const std::exception& error) {
+            std::osyncstream(std::cerr)<<"{\"event\":\"audio_worker_error\",\"message\":"<<json_string(error.what())<<"}"<<std::endl;
+            if(WaitForSingleObject(stop,1000)==WAIT_OBJECT_0) return;
         }
     }
 }

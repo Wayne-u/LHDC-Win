@@ -3,14 +3,14 @@ Signature="$WINDOWS NT$"
 Class=Bluetooth
 ClassGuid={e0cbf06c-cd8b-4647-bb8a-263b43f0f974}
 Provider=%Provider%
-DriverVer=10/05/2026,0.6.0.0
+DriverVer=10/14/2026,0.6.1.0
 CatalogFile=lhdc-transport.cat
 PnpLockdown=1
 
 [Manufacturer]
-%Provider%=Models,NTamd64.10.0...28000
+%Provider%=Models,NTamd64.10.0...22621
 
-[Models.NTamd64.10.0...28000]
+[Models.NTamd64.10.0...22621]
 ; Deliberately matches only the observed OPPO Audio Sink hardware ID.
 ; Binding must still be selected and checked for the exact device instance.
 %DeviceDesc%=Transport,BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}_VID&000102b0_PID&0000
@@ -50,7 +50,7 @@ ServiceBinary=%13%\lhdc-transport.sys
 KmdfService=lhdc-transport,Wdf
 
 [Wdf]
-KmdfLibraryVersion=1.35
+KmdfLibraryVersion=1.33
 
 [Strings]
 Provider="Windows LHDC Prototype"

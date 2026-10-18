@@ -1,14 +1,13 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Win32;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 namespace Lhdc.ControlPanel;
-public sealed record WorkspaceConfig(string WorkspaceRoot,string PowerShellExecutable);
 public sealed class AudioModeRestartRequiredException:IOException {
-    public AudioModeRestartRequiredException():base("Windows 驱动已选择，请手动重启电脑完成切换。") {}
+    public AudioModeRestartRequiredException():base("Windows 尚未完成音频驱动切换，需要手动重启电脑后重试。") {}
 }
 public sealed class NativeClient {
     public static AudioProfile? InstalledProfile() {
@@ -30,13 +29,18 @@ public sealed class NativeClient {
         key.SetValue("Profile",value,RegistryValueKind.Binary);
         key.SetValue("AdaptiveBitrate",profile.AdaptiveBitrate?1:0,RegistryValueKind.DWord);
     }
-    public WorkspaceConfig Config { get; }
+    private readonly string applicationRoot;
+    private readonly string powerShellExecutable;
     public NativeClient() {
-        Config=JsonSerializer.Deserialize<WorkspaceConfig>(File.ReadAllText(Path.Combine(AppContext.BaseDirectory,"workspace.json"),Encoding.UTF8))
-            ?? throw new InvalidDataException("workspace.json 为空");
+        applicationRoot=AppContext.BaseDirectory;
+        powerShellExecutable=Path.Combine(applicationRoot,"runtime","powershell","pwsh.exe");
+        foreach(var relative in new[]{"scripts/Set-AudioMode.ps1","backend/lhdc-host.exe","runtime/powershell/pwsh.exe"}) {
+            var path=Path.Combine(applicationRoot,relative);
+            if(!File.Exists(path)) throw new FileNotFoundException("发布包不完整，请重新解压后运行。",path);
+        }
     }
     public async Task<JsonObject> Host(params string[] arguments) {
-        var start=new ProcessStartInfo(Path.Combine(Config.WorkspaceRoot,"build","host","lhdc-host.exe")) {
+        var start=new ProcessStartInfo(Path.Combine(applicationRoot,"backend","lhdc-host.exe")) {
             UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,
             StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8
         };
@@ -51,16 +55,23 @@ public sealed class NativeClient {
         return JsonNode.Parse(lines[^1])?.AsObject() ?? throw new InvalidDataException("后端没有返回 JSON");
     }
     public Task<JsonObject> SetAudioMode(string mode,AudioProfile profile,string resultFile) {
-        var script=Path.Combine(Config.WorkspaceRoot,"scripts","Set-AudioMode.ps1");
+        var script=Path.Combine(applicationRoot,"scripts","Set-AudioMode.ps1");
         var adaptive=profile.AdaptiveBitrate?" -AdaptiveBitrate":"";
-        var command=$"& {Quote(script)} -Mode {Quote(mode)} -SampleRate {profile.SampleRate} -Bits {profile.Bits} -Kbps {profile.Kbps}{adaptive} -ResultFile {Quote(resultFile)}";
+        var command=$"& {Quote(script)} -PackageRoot {Quote(applicationRoot)} -Mode {Quote(mode)} -SampleRate {profile.SampleRate} -Bits {profile.Bits} -Kbps {profile.Kbps}{adaptive} -ResultFile {Quote(resultFile)}";
         return RunElevated(command,resultFile);
+    }
+    public bool ServiceBinaryCurrent() {
+        var installed=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"LHDC-Win","lhdc-service.exe");
+        if(!File.Exists(installed)) return false;
+        using var current=File.OpenRead(installed);
+        using var bundled=File.OpenRead(Path.Combine(applicationRoot,"backend","lhdc-service.exe"));
+        return SHA256.HashData(current).AsSpan().SequenceEqual(SHA256.HashData(bundled));
     }
     private static string Quote(string value)=>"'"+value.Replace("'","''")+"'";
     private async Task<JsonObject> RunElevated(string command,string resultFile) {
-        var start=new ProcessStartInfo(Config.PowerShellExecutable) {
+        var start=new ProcessStartInfo(powerShellExecutable) {
             UseShellExecute=true,Verb="runas",WindowStyle=ProcessWindowStyle.Hidden,
-            Arguments="-NoProfile -EncodedCommand "+Convert.ToBase64String(Encoding.Unicode.GetBytes(command))
+            Arguments="-NoProfile -ExecutionPolicy Bypass -EncodedCommand "+Convert.ToBase64String(Encoding.Unicode.GetBytes(command))
         };
         using var process=Process.Start(start) ?? throw new IOException("无法启动管理员操作");
         await process.WaitForExitAsync();

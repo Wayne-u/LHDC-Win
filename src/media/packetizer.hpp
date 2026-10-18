@@ -7,6 +7,7 @@ public:
     Packetizer(std::uint32_t out_mtu,std::uint32_t block_samples,std::uint16_t sequence=0,
         std::uint32_t timestamp=0,std::uint8_t media_sequence=0);
     std::vector<std::uint8_t> pack(const EncodedPacket& packet);
+    void skip_samples(std::uint64_t samples);
 private:
     std::uint32_t mtu_,block_samples_,timestamp_;
     std::uint16_t sequence_;

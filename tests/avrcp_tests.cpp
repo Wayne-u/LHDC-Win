@@ -18,6 +18,15 @@ int main() {
         require(av::volume_value(av::parse(lhdc::avdtp::unhex("32110e094800001958500000011c")))==28);
         require(av::volume_value(av::parse(lhdc::avdtp::unhex("22110e0d4800001958310000020d00")))==0);
         require(av::volume_value(av::parse(lhdc::avdtp::unhex("22110e0d4800001958310000020dff")))==127); // RFD bit ignored
+        const auto press=av::parse(lhdc::avdtp::unhex("10110e00487c4400"));
+        const auto release=av::parse(lhdc::avdtp::unhex("10110e00487cc400"));
+        require(av::media_button(press)->command==av::MediaCommand::play && av::media_button(press)->pressed);
+        require(!av::media_button(release)->pressed);
+        require(av::reply(press,av::accepted,press.operands)==lhdc::avdtp::unhex("12110e09487c4400"));
+        require(!av::media_button(av::parse(lhdc::avdtp::unhex("10110e00487c7e00"))));
+        require(!av::media_button(av::parse(lhdc::avdtp::unhex("12110e09487c4400"))));
+        rejects([]{av::media_button(av::parse(lhdc::avdtp::unhex("10110e00487c44")));});
+        rejects([]{av::media_button(av::parse(lhdc::avdtp::unhex("10110e00487c440101")));});
         rejects([]{av::volume_value(av::parse(lhdc::avdtp::unhex("32110e0a48000019585000000101")));});
         rejects([]{av::supports_volume(av::parse(lhdc::avdtp::unhex("12110e0c4800001958100000040303060d")));});
         require(!av::supports_volume(av::parse(lhdc::avdtp::unhex("12110e0c4800001958100000020300"))));

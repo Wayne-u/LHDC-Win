@@ -12,6 +12,24 @@
 namespace lhdc {
 namespace {
 namespace av=avrcp;
+void send_media_command(av::MediaCommand command) {
+    unsigned code=0;
+    switch (command) {
+    case av::MediaCommand::play: code=APPCOMMAND_MEDIA_PLAY;break;
+    case av::MediaCommand::pause: code=APPCOMMAND_MEDIA_PAUSE;break;
+    case av::MediaCommand::stop: code=APPCOMMAND_MEDIA_STOP;break;
+    case av::MediaCommand::next: code=APPCOMMAND_MEDIA_NEXTTRACK;break;
+    case av::MediaCommand::previous: code=APPCOMMAND_MEDIA_PREVIOUSTRACK;break;
+    case av::MediaCommand::rewind: code=APPCOMMAND_MEDIA_REWIND;break;
+    case av::MediaCommand::fast_forward: code=APPCOMMAND_MEDIA_FAST_FORWARD;break;
+    }
+    const auto window=GetForegroundWindow();
+    if (!window) throw WindowsError("Media command target",ERROR_INVALID_WINDOW_HANDLE);
+    DWORD_PTR result=0;
+    if (!SendMessageTimeoutW(window,WM_APPCOMMAND,reinterpret_cast<WPARAM>(window),
+        static_cast<LPARAM>(code|FAPPCOMMAND_OEM)<<16,SMTO_ABORTIFHUNG,250,&result))
+        throw WindowsError("Media command dispatch",GetLastError());
+}
 constexpr GUID volume_context={0xd9c90dc2,0x245d,0x47ac,{0x9c,0x70,0x31,0xcf,0x1a,0x15,0x30,0xb6}};
 ComPtr<IAudioEndpointVolume> headphone_volume() {
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -95,6 +113,16 @@ public:
 private:
     Transport& transport_;
     void answer(const av::Frame& frame) {
+        if (const auto button=av::media_button(frame)) {
+            if (button->pressed) {
+                try { send_media_command(button->command); }
+                catch (const std::exception& error) {
+                    std::osyncstream(std::cerr)<<"{\"event\":\"avrcp_media_command_error\",\"message\":"<<json_string(error.what())<<"}"<<std::endl;
+                    send(av::reply(frame,0x0a,frame.operands));return;
+                }
+            }
+            send(av::reply(frame,av::accepted,frame.operands));return;
+        }
         if(frame.opcode==0) {
             const auto pdu=av::vendor(frame);
             if(pdu.pdu==av::get_capabilities && frame.ctype==1 && pdu.parameters.size()==1) {

@@ -32,7 +32,7 @@ Copy-Item -LiteralPath (Join-Path $source ($packageName+'.sys')),(Join-Path $sou
 & $signTool sign /fd SHA256 /s My /sha1 $certificate.Thumbprint (Join-Path $destination ($packageName+'.sys'))
 if ($LASTEXITCODE -ne 0) { throw 'SYS signing failed.' }
 # Generate the catalog after signing SYS so its hash covers the signed binary.
-& $inf2cat "/driver:$destination" /os:10_GE_X64
+& $inf2cat "/driver:$destination" '/os:10_NI_X64,10_GE_X64'
 if ($LASTEXITCODE -ne 0) { throw 'Catalog regeneration failed.' }
 & $signTool sign /fd SHA256 /s My /sha1 $certificate.Thumbprint (Join-Path $destination ($packageName+'.cat'))
 if ($LASTEXITCODE -ne 0) { throw 'Catalog signing failed.' }

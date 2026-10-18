@@ -12,7 +12,7 @@ struct SessionCompletion { std::uint64_t bytes; ULONG pending_signal,pending_med
 class MediaSession {
 public:
     bool supports_bitrate(Profile profile) const;
-    MediaSession(std::uint64_t remote,Profile profile):transport_(remote),protocol_(transport_,profile),profile_(profile){}
+    MediaSession(std::uint64_t remote,Profile profile);
     ~MediaSession();
     MediaSession(const MediaSession&)=delete;
     void discover();

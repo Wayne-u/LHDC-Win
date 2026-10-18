@@ -16,6 +16,18 @@ Vendor vendor(const Frame& frame) {
         throw std::runtime_error("Invalid AVRCP vendor PDU");
     return {bytes[3],Bytes(bytes.begin()+7,bytes.end())};
 }
+std::optional<MediaButton> media_button(const Frame& frame) {
+    if (frame.response || frame.opcode!=0x7c || frame.ctype!=0) return {};
+    if (frame.operands.size()!=2 || frame.operands[1]!=0) throw std::runtime_error("Invalid AVRCP media button");
+    const auto operation=static_cast<MediaCommand>(frame.operands[0]&0x7f);
+    switch (operation) {
+    case MediaCommand::play: case MediaCommand::stop: case MediaCommand::pause:
+    case MediaCommand::rewind: case MediaCommand::fast_forward:
+    case MediaCommand::next: case MediaCommand::previous:
+        return MediaButton{operation,(frame.operands[0]&0x80)==0};
+    default: return {};
+    }
+}
 Bytes command(std::uint8_t label,std::uint8_t ctype,std::uint8_t pdu,std::span<const std::uint8_t> parameters) {
     if(label>15 || (ctype!=0 && ctype!=1 && ctype!=3) || parameters.size()>0xffff)
         throw std::invalid_argument("Invalid AVRCP command");

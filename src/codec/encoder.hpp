@@ -16,6 +16,7 @@ public:
     EncodedPacket encode(std::span<const std::uint8_t> pcm);
     void set_bitrate(std::uint32_t kbps);
     std::uint32_t bitrate() const { return profile_.kbps; }
+    std::uint32_t buffered_samples() const { return buffered_frames_*block_samples_; }
 private:
     std::unique_ptr<lhdcv5_enc_t, decltype(&lhdcv5_enc_free)> handle_{nullptr, lhdcv5_enc_free};
     std::uint32_t block_samples_ = 0;

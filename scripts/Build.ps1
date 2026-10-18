@@ -2,6 +2,7 @@ param(
     [ValidateSet('Host','Transport','Audio','UI')][string]$Target='Host',
     [ValidateSet('Debug','Release')][string]$Configuration='Release',
     [switch]$Analyze,
+    [switch]$WithoutTests,
     [switch]$Run
 )
 $ErrorActionPreference='Stop'
@@ -10,12 +11,11 @@ $projectRoot=Split-Path -Parent $PSScriptRoot
 if ($Run -and $Target -ne 'UI') { throw '-Run is only available for the UI target.' }
 if ($Analyze -and $Target -notin @('Transport','Audio')) { throw '-Analyze is only available for driver targets.' }
 if ($Target -eq 'Audio' -and $Configuration -ne 'Release') { throw 'The audio driver project only defines Release.' }
+if ($WithoutTests -and $Target -ne 'Host') { throw '-WithoutTests is only available for the Host target.' }
 
 if ($Target -eq 'UI') {
-    $output=Join-Path $projectRoot 'build/ui'
-    dotnet build (Join-Path $projectRoot 'ui/Lhdc.ControlPanel/Lhdc.ControlPanel.csproj') -c $Configuration -o $output --nologo
-    if ($LASTEXITCODE -ne 0) { throw 'Control panel build failed.' }
-    [pscustomobject]@{WorkspaceRoot=$projectRoot;PowerShellExecutable=(Get-Process -Id $PID).Path} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'workspace.json') -Encoding UTF8
+    & (Join-Path $PSScriptRoot 'Publish.ps1') -Configuration $Configuration -NoArchive
+    $output=Join-Path $projectRoot 'build/app'
     $program=Join-Path $output 'LHDC-ControlPanel.exe'
     if ($Run) { Start-Process -FilePath $program }
     Write-Host "Control panel: $program"
@@ -28,12 +28,15 @@ Import-Module "$installation/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
 Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 
 if ($Target -eq 'Host') {
-    cmake -S $projectRoot -B "$projectRoot/build/host" -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+    $testing=if ($WithoutTests) { 'OFF' } else { 'ON' }
+    cmake -S $projectRoot -B "$projectRoot/build/host" -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" "-DBUILD_TESTING=$testing" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
     if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed.' }
     cmake --build "$projectRoot/build/host"
     if ($LASTEXITCODE -ne 0) { throw 'Host build failed.' }
-    ctest --test-dir "$projectRoot/build/host" --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+    if (-not $WithoutTests) {
+        ctest --test-dir "$projectRoot/build/host" --output-on-failure
+        if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+    }
     return
 }
 
@@ -139,11 +142,31 @@ $2
     $topology='Source/Filters/speakertoptable.h'
     # Windows derives the endpoint type, icon and localized name from this bridge pin.
     Replace-Source $topology '&KSNODETYPE_SPEAKER' '&KSNODETYPE_HEADPHONES'
-    Replace-Source $topology '#define _SIMPLEAUDIOSAMPLE_SPEAKERTOPTABLE_H_' "#define _SIMPLEAUDIOSAMPLE_SPEAKERTOPTABLE_H_`n#include `"format_config.h`""
+    Replace-Source $topology '#define _SIMPLEAUDIOSAMPLE_SPEAKERTOPTABLE_H_' "#define _SIMPLEAUDIOSAMPLE_SPEAKERTOPTABLE_H_`n#include `"format_config.h`"`n#include `"connection.h`""
+    Replace-Source 'Source/Inc/mintopo.h' '(?m)^public:' "public:`n    volatile LONG m_LhdcConnected = FALSE;`n    GUID m_LhdcContainer{};"
+    Replace-Source 'Source/Main/mintopo.cpp' '#include "mintopo.h"' "#include `"mintopo.h`"`n#include `"connection.h`""
+    Replace-Source 'Source/Main/mintopo.cpp' '(?m)^Done:\r?\n    return ntStatus;\r?\n\} // Init' @'
+    ntStatus = LhdcLoadJackContainer(m_AdapterCommon->GetPhysicalDeviceObject(), &m_LhdcContainer);
+Done:
+    return ntStatus;
+} // Init
+'@
+    Replace-Source $topology 'PropertyHandler_SpeakerTopoFilter' 'PropertyHandler_LhdcJack' 2
     Replace-Source $topology '(?s)(PCPROPERTY_ITEM PropertiesSpeakerTopoFilter\[\] =\s+\{)' @'
 $1
+    {&KSPROPSETID_LHDC_CONNECTION,LHDC_CONNECTION_STATUS,
+     KSPROPERTY_TYPE_GET|KSPROPERTY_TYPE_SET|KSPROPERTY_TYPE_BASICSUPPORT,PropertyHandler_LhdcConnection},
+    {&KSPROPSETID_Jack,KSPROPERTY_JACK_CONTAINERID,
+     KSPROPERTY_TYPE_GET|KSPROPERTY_TYPE_BASICSUPPORT,PropertyHandler_LhdcJack},
     {&KSPROPSETID_Jack,KSPROPERTY_JACK_DESCRIPTION3,
      KSPROPERTY_TYPE_GET|KSPROPERTY_TYPE_BASICSUPPORT,PropertyHandler_LhdcJackConfig},
+'@
+    Replace-Source $topology 'DEFINE_PCAUTOMATION_TABLE_PROP\(AutomationSpeakerTopoFilter, PropertiesSpeakerTopoFilter\);' @'
+static PCEVENT_ITEM SpeakerJackEvents[] = {
+    {&KSEVENTSETID_PinCapsChange,KSEVENT_PINCAPS_JACKINFOCHANGE,
+     PCEVENT_ITEM_FLAG_ENABLE|PCEVENT_ITEM_FLAG_BASICSUPPORT,EventHandler_LhdcJack}
+};
+DEFINE_PCAUTOMATION_TABLE_PROP_EVENT(AutomationSpeakerTopoFilter,PropertiesSpeakerTopoFilter,SpeakerJackEvents);
 '@
     Replace-Source 'Source/Main/adapter.cpp' '    ntStatus = InstallAllRenderFilters\(DeviceObject, Irp, pAdapterCommon\);' @'
     ntStatus = LhdcLoadPlaybackFormat(&SpeakerHostPinSupportedDeviceFormats[0],&SpeakerPinDataRangesStream[0]);

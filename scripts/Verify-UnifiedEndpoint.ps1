@@ -22,7 +22,7 @@ $originalAdaptive=(Native @('audio-status')).adaptive_bitrate
 try {
     foreach($rate in $SampleRates) { foreach($bits in @(16,24)) {
         $name="$rate-$bits"
-        & (Join-Path $PSScriptRoot 'Set-AudioMode.ps1') -Mode LHDC -SampleRate $rate -Bits $bits -Kbps $originalKbps -ResultFile (Join-Path $dir ("install-$name.json"))
+        & (Join-Path $PSScriptRoot 'Set-AudioMode.ps1') -PackageRoot (Join-Path $root 'build/app') -Mode LHDC -SampleRate $rate -Bits $bits -Kbps $originalKbps -ResultFile (Join-Path $dir ("install-$name.json"))
         Stop-Service -Name 'LHDC-Win'
         (Get-Service -Name 'LHDC-Win').WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20))
         # Isolate Windows -> WaveRT PCM from Bluetooth transport and earbud wear.
@@ -63,7 +63,7 @@ try {
 finally {
     if($null -ne $render -and -not $render.HasExited) { $render.Kill();$render.WaitForExit() }
     try {
-        & (Join-Path $PSScriptRoot 'Set-AudioMode.ps1') -Mode LHDC -SampleRate $originalRate -Bits $originalBits -Kbps $originalKbps -AdaptiveBitrate:$originalAdaptive -ResultFile (Join-Path $dir 'restore.json')
+        & (Join-Path $PSScriptRoot 'Set-AudioMode.ps1') -PackageRoot (Join-Path $root 'build/app') -Mode LHDC -SampleRate $originalRate -Bits $originalBits -Kbps $originalKbps -AdaptiveBitrate:$originalAdaptive -ResultFile (Join-Path $dir 'restore.json')
     } catch { $result.RestoreError=$_.Exception.Message }
     $result.FinishedAt=Get-Date -Format o
     $json=$result|ConvertTo-Json -Depth 8

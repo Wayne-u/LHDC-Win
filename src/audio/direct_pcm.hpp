@@ -9,6 +9,8 @@
 #include <filesystem>
 namespace lhdc {
 std::optional<std::wstring> find_direct_pcm();
+void sync_audio_connection(bool connected);
+void inspect_audio_connection();
 struct DirectPcmChunk { LHDC_PCM_STATE state; std::vector<std::uint8_t> bytes; };
 class DirectPcm {
 public:

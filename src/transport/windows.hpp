@@ -26,6 +26,7 @@ public:
 void inspect_windows();
 void inspect_connection(std::uint64_t address);
 bool bluetooth_connected(std::uint64_t address);
+void claim_avrcp_controller();
 struct SendTiming {
     std::int64_t submit_us=0,wait_us=0,completion_us=0,pending_age_us=0;
     bool pending=false;
@@ -37,7 +38,7 @@ public:
         ~PendingSend();
         PendingSend(const PendingSend&)=delete;
         PendingSend& operator=(const PendingSend&)=delete;
-        SendTiming wait();
+        SendTiming wait(DWORD timeout_ms=10000);
         std::int64_t pending_age_us() const;
         const SendTiming& timing() const { return timing_; }
     private:
@@ -61,6 +62,7 @@ public:
     std::unique_ptr<PendingSend> begin_send(std::span<const std::uint8_t> bytes,ULONG channel);
     std::vector<std::uint8_t> receive(ULONG channel=LHDC_CHANNEL_SIGNAL,DWORD timeout_ms=10000);
     void cancel_pending();
+    void audio_present(bool present);
 private:
     DWORD ioctl(DWORD code,void* input,DWORD input_size,void* output,DWORD output_size,DWORD timeout_ms=10000);
     HANDLE handle_=INVALID_HANDLE_VALUE;

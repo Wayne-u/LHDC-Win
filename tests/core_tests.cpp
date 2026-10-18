@@ -26,16 +26,16 @@ int main() {
         require(fixed.observe(1000,300,10000,500)==1000,"Fixed bitrate never drops automatically");
         lhdc::BitrateControl adaptive({48000,24,1000},true);
         require(adaptive.bitrate()==500,"Adaptive bitrate starts at a conservative supported level");
-        require(adaptive.observe(100,130,0,0)==500 && adaptive.observe(200,60,0,0)==500,"Transient backlog does not lower bitrate");
+        require(adaptive.observe(100,100,0,0)==500 && adaptive.observe(200,60,0,0)==500,"Transient backlog does not lower bitrate");
         require(adaptive.observe(15200,60,0,0)==900 && adaptive.observe(30200,60,0,0)==1000,"Stable playback gradually approaches the ceiling");
-        require(adaptive.observe(30300,130,0,0)==1000 && adaptive.observe(30400,130,0,0)==1000,"Backlog requires sustained pressure");
-        require(adaptive.observe(30500,130,0,0)==900,"Sustained backlog lowers one level");
+        require(adaptive.observe(30300,100,0,0)==1000 && adaptive.observe(30400,100,0,0)==1000,"Backlog requires sustained pressure");
+        require(adaptive.observe(30500,100,0,0)==900,"Sustained backlog lowers one level");
         require(adaptive.observe(30600,60,32,0)==500,"New PCM loss immediately lowers bitrate");
         require(adaptive.observe(30700,60,32,0)==500,"Existing loss is not counted twice");
         require(adaptive.observe(30800,190,32,0)==400,"Severe backlog lowers before overflow");
         require(adaptive.observe(30900,190,32,0)==400,"Adaptive floor remains in the negotiated range");
-        require(adaptive.observe(50000,60,32,0)==400 && adaptive.observe(60900,60,32,0)==500,"Recovery waits thirty seconds after congestion");
-        require(adaptive.observe(75900,60,32,0)==900 && adaptive.observe(90900,60,32,0)==1000 && adaptive.observe(105900,60,32,0)==1000,"Recovery respects ladder and ceiling");
+        require(adaptive.observe(50000,60,32,0)==400 && adaptive.observe(60900,60,32,0)==400,"A recently failed rate remains blocked after the ordinary recovery interval");
+        require(adaptive.observe(90800,60,32,0)==500 && adaptive.observe(105800,60,32,0)==900 && adaptive.observe(120800,60,32,0)==1000,"Recovery respects each failed rate's retry deadline and the ceiling");
         lhdc::BitrateControl sends({48000,24,1000},true);
         require(sends.observe(15000,60,0,0)==900 && sends.observe(30000,60,0,0)==1000,"Prepare a high bitrate for send-pressure regression");
         require(sends.observe(30100,60,0,200)==1000,"A delayed send without PCM backlog does not prove congestion");
@@ -45,11 +45,16 @@ int main() {
         require(sends.observe(30600,100,0,150)==400,"Persistent severe congestion reaches the negotiated floor");
         lhdc::BitrateControl severe({48000,24,1000},true);
         severe.observe(15000,60,0,0);severe.observe(30000,60,0,0);
-        require(severe.observe(30100,190,0,0)==500,"Severe PCM backlog skips the ineffective 1000-to-900 step");
+        require(severe.observe(30100,115,0,0)==500,"Severe PCM backlog lowers bitrate before reaching the 120ms queue limit");
         lhdc::BitrateControl loss({48000,24,1000},true);
         loss.observe(15000,60,0,0);loss.observe(30000,60,0,0);
         require(loss.observe(30100,60,1,0)==500,"New PCM loss at 1000 kbps skips directly to 500");
         require(loss.observe(60000,60,1,0)==500 && loss.observe(60100,60,1,0)==900,"Cross-stage drops preserve the thirty-second recovery delay");
+        lhdc::BitrateControl probe({48000,24,900},true);
+        require(probe.observe(15000,60,0,0)==900 && probe.observe(15100,190,0,0)==500,"A congested upward probe returns to the lower rate");
+        require(probe.observe(45100,60,0,0)==500 && probe.observe(75100,60,0,0)==900,"A failed probe waits sixty seconds before retrying");
+        require(probe.observe(75200,190,0,0)==500 && probe.observe(135200,60,0,0)==500,"A repeated failed probe doubles its retry delay");
+        require(probe.observe(195200,60,0,0)==900,"Retry backoff eventually permits testing the failed level again");
         lhdc::BitrateControl fractional({44100,24,900},true);
         require(fractional.bitrate()==480 && fractional.observe(15000,60,0,0)==900,"44.1 kHz uses the actual encoder bitrate ladder");
         require(fractional.observe(15100,190,0,0)==480,"Severe congestion uses 480 rather than inventing 500 at 44.1 kHz");
@@ -176,6 +181,19 @@ int main() {
                 require(encoded>0 && encoded<=24,"Profile produces actual frames");
             }
         lhdc::Packetizer wrapping(20,240,65535,0xffffff00u,255);
+        {
+            lhdc::Packetizer gap(665,240,99,1000,7);
+            gap.skip_samples(4800);
+            require(gap.pack({{0xaa},2})==av::unhex("80600063000016a8000000010807aa"),"Dropped PCM advances RTP sample time without inventing packet sequence gaps");
+            require(gap.pack({{0xbb},1})==av::unhex("8060006400001888000000010408bb"),"Normal RTP time continues after a PCM gap");
+            lhdc::Packetizer overflow(665,240,0,0xfffffff0u);
+            overflow.skip_samples(0x100000020ull);
+            require(overflow.pack({{0xcc},1})==av::unhex("8060000000000010000000010400cc"),"Large PCM gaps wrap the RTP clock without changing sequence numbers");
+            lhdc::Encoder held({48000,24,500},665);
+            require(held.encode(av::Bytes(held.block_bytes())).frames==0 && held.buffered_samples()==240,"A partially assembled packet retains its source sample count");
+            held=lhdc::Encoder({48000,24,500},665);
+            require(held.buffered_samples()==0,"A discontinuity discards pre-gap encoded samples");
+        }
         require(wrapping.pack({{},0}).empty(),"Buffered empty encode has no RTP packet");
         require(wrapping.pack({{0xaa,0xbb},2})==av::unhex("8060ffffffff ff000000000108ffaabb"),"Exact RTP/LHDC bytes before rollover");
         require(wrapping.pack({{0xcc},1})==av::unhex("80600000000000e0000000010400cc"),"RTP timestamp and both sequence rollovers");

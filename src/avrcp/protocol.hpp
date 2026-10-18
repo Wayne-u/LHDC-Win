@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <span>
 #include <vector>
+#include <optional>
 namespace lhdc::avrcp {
 using Bytes=std::vector<std::uint8_t>;
 constexpr std::uint8_t get_capabilities=0x10,register_notification=0x31,set_absolute_volume=0x50;
@@ -13,6 +14,9 @@ struct Frame {
     Bytes operands;
 };
 struct Vendor { std::uint8_t pdu; Bytes parameters; };
+enum class MediaCommand : std::uint8_t { play=0x44,stop=0x45,pause=0x46,rewind=0x48,fast_forward=0x49,next=0x4b,previous=0x4c };
+struct MediaButton { MediaCommand command; bool pressed; };
+std::optional<MediaButton> media_button(const Frame& frame);
 Frame parse(std::span<const std::uint8_t> bytes);
 Vendor vendor(const Frame& frame);
 Bytes command(std::uint8_t label,std::uint8_t ctype,std::uint8_t pdu,std::span<const std::uint8_t> parameters);

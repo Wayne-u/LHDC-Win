@@ -1,5 +1,6 @@
 #include <initguid.h>
 #include "windows.hpp"
+#include "radio.hpp"
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <devpkey.h>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include "host/json.hpp"
 namespace lhdc {
+using detail::query_connection;
 static void win_error(const char* operation) {
     throw WindowsError(operation,GetLastError());
 }
@@ -45,29 +47,32 @@ static std::wstring property(HDEVINFO set,SP_DEVINFO_DATA& device,const DEVPROPK
     if (!SetupDiGetDevicePropertyW(set,&device,&key,&type,reinterpret_cast<PBYTE>(buffer.data()),size,&size,0)) win_error("Device property");
     return std::wstring(buffer.data());
 }
-static std::vector<std::wstring> interfaces() {
-    DeviceSet set{SetupDiGetClassDevsW(&GUID_DEVINTERFACE_LHDC_TRANSPORT,nullptr,nullptr,DIGCF_PRESENT|DIGCF_DEVICEINTERFACE)};
-    if (set.value==INVALID_HANDLE_VALUE) win_error("Transport enumeration");
-    std::vector<std::wstring> paths;
+struct DeviceInterface { std::wstring path; DEVINST device; };
+static std::vector<DeviceInterface> interfaces(const GUID& type=GUID_DEVINTERFACE_LHDC_TRANSPORT) {
+    DeviceSet set{SetupDiGetClassDevsW(&type,nullptr,nullptr,DIGCF_PRESENT|DIGCF_DEVICEINTERFACE)};
+    if (set.value==INVALID_HANDLE_VALUE) win_error("Device interface enumeration");
+    std::vector<DeviceInterface> paths;
     for (DWORD i=0;;++i) {
         SP_DEVICE_INTERFACE_DATA data{sizeof(data)};
-        if (!SetupDiEnumDeviceInterfaces(set.value,nullptr,&GUID_DEVINTERFACE_LHDC_TRANSPORT,i,&data)) {
+        if (!SetupDiEnumDeviceInterfaces(set.value,nullptr,&type,i,&data)) {
             if (GetLastError()==ERROR_NO_MORE_ITEMS) break;
-            win_error("Transport interface enumeration");
+            win_error("Device interface enumeration");
         }
         DWORD size=0;
         SetupDiGetDeviceInterfaceDetailW(set.value,&data,nullptr,0,&size,nullptr);
-        if (GetLastError()!=ERROR_INSUFFICIENT_BUFFER) win_error("Transport interface size");
+        if (GetLastError()!=ERROR_INSUFFICIENT_BUFFER) win_error("Device interface size");
         std::vector<std::uint8_t> buffer(size);
         auto detail=reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());
         detail->cbSize=sizeof(*detail);
-        if (!SetupDiGetDeviceInterfaceDetailW(set.value,&data,detail,size,nullptr,nullptr)) win_error("Transport interface path");
-        paths.emplace_back(detail->DevicePath);
+        SP_DEVINFO_DATA device{sizeof(device)};
+        if (!SetupDiGetDeviceInterfaceDetailW(set.value,&data,detail,size,nullptr,&device)) win_error("Device interface path");
+        paths.push_back({detail->DevicePath,device.DevInst});
     }
     return paths;
 }
 void inspect_windows() {
     std::ostringstream out;
+    const auto radios=interfaces(GUID_BTHPORT_DEVICE_INTERFACE);
     DeviceSet set{SetupDiGetClassDevsW(nullptr,nullptr,nullptr,DIGCF_ALLCLASSES)};
     if (set.value==INVALID_HANDLE_VALUE) win_error("PnP enumeration");
     out << "{\"devices\":[";
@@ -83,7 +88,8 @@ void inspect_windows() {
         std::wstring instance(id.data());
         std::wstring upper(instance);
         CharUpperBuffW(upper.data(),static_cast<DWORD>(upper.size()));
-        if (upper.find(L"BTHENUM\\{0000110B-")!=0 && upper.find(L"USB\\VID_0BDA&PID_5852")!=0) continue;
+        const bool radio=std::any_of(radios.begin(),radios.end(),[&](const auto& item){return item.device==device.DevInst;});
+        if (upper.find(L"BTHENUM\\{0000110B-")!=0 && !radio) continue;
         if (!first) out << ',';
         first=false;
         ULONG status=0,problem=0;
@@ -101,28 +107,10 @@ void inspect_windows() {
     out << "],\"transport_interfaces\":[";
     for (std::size_t i=0;i<paths.size();++i) {
         if (i) out << ',';
-        out << json_string(utf8(paths[i]));
+        out << json_string(utf8(paths[i].path));
     }
     out << "],\"peer_capabilities_observed\":false}\n";
     std::cout << out.str();
-}
-struct ConnectionInfo { BLUETOOTH_DEVICE_INFO device; bool radio,known; };
-static ConnectionInfo query_connection(std::uint64_t address) {
-    BLUETOOTH_DEVICE_INFO info{};
-    info.dwSize=sizeof(info); info.Address.ullLong=address;
-    BLUETOOTH_FIND_RADIO_PARAMS params{sizeof(params)};
-    HANDLE radio=nullptr;
-    const auto enumeration=BluetoothFindFirstRadio(&params,&radio);
-    if (!enumeration && GetLastError()!=ERROR_NO_MORE_ITEMS) win_error("Bluetooth radio enumeration");
-    DWORD status=ERROR_NOT_FOUND;
-    if (enumeration) {
-        status=BluetoothGetDeviceInfo(radio,&info);
-        CloseHandle(radio); BluetoothFindRadioClose(enumeration);
-    }
-    if (status!=ERROR_SUCCESS && status!=ERROR_NOT_FOUND) {
-        SetLastError(status); win_error("Bluetooth device information");
-    }
-    return {info,enumeration!=nullptr,status==ERROR_SUCCESS};
 }
 std::optional<TargetDevice> discover_target() {
     DeviceSet set{SetupDiGetClassDevsW(nullptr,L"BTHENUM",nullptr,DIGCF_ALLCLASSES|DIGCF_PRESENT)};
@@ -174,6 +162,25 @@ void inspect_target() {
     std::cout<<"}\n";
 }
 bool bluetooth_connected(std::uint64_t address) { return query_connection(address).device.fConnected!=FALSE; }
+void claim_avrcp_controller() {
+    auto instance=target_device().instance;
+    CharUpperBuffW(instance.data(),static_cast<DWORD>(instance.size()));
+    constexpr wchar_t sink[]=L"{0000110B-0000-1000-8000-00805F9B34FB}";
+    const auto position=instance.find(sink);
+    if (position==std::wstring::npos) throw std::runtime_error("AVRCP controller identity is invalid");
+    instance.replace(position,std::size(sink)-1,L"{0000110E-0000-1000-8000-00805F9B34FB}");
+    DEVINST device=0;
+    auto result=CM_Locate_DevNodeW(&device,instance.data(),CM_LOCATE_DEVNODE_NORMAL);
+    if (result!=CR_SUCCESS) throw std::runtime_error("Native AVRCP controller lookup failed, CR="+std::to_string(result));
+    ULONG status=0,problem=0;
+    result=CM_Get_DevNode_Status(&status,&problem,device,0);
+    if (result!=CR_SUCCESS) throw std::runtime_error("Native AVRCP controller status failed, CR="+std::to_string(result));
+    if (problem==CM_PROB_DISABLED) return;
+    if (problem) throw std::runtime_error("Native AVRCP controller has a device problem="+std::to_string(problem));
+    result=CM_Disable_DevNode(device,CM_DISABLE_UI_NOT_OK|CM_DISABLE_PERSIST);
+    if (result!=CR_SUCCESS) throw std::runtime_error("Native AVRCP controller claim failed, CR="+std::to_string(result));
+    std::cout<<"{\"event\":\"native_avrcp_controller_claimed\"}"<<std::endl;
+}
 void inspect_connection(std::uint64_t address) {
     const auto connection=query_connection(address); const auto& info=connection.device;
     std::cout << "{\"event\":\"bluetooth_connection\",\"radio_present\":" << (connection.radio?"true":"false") << ",\"known\":" << (connection.known?"true":"false")
@@ -185,13 +192,17 @@ Transport::Transport(std::uint64_t address):address_(address) {
     const auto paths=interfaces();
     if (paths.empty()) throw std::runtime_error("LHDC transport driver is not bound/loaded; run inspect for the current Audio Sink service");
     if (paths.size()!=1) throw std::runtime_error("Expected exactly one LHDC transport interface");
-    handle_=CreateFileW(paths[0].c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,nullptr);
+    handle_=CreateFileW(paths[0].path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,nullptr);
     if (handle_==INVALID_HANDLE_VALUE) win_error("Transport open");
     try {
         if (info().RemoteAddress!=address_) throw std::runtime_error("Transport remote address does not match the selected earphone");
     } catch (...) { CloseHandle(handle_); handle_=INVALID_HANDLE_VALUE; throw; }
 }
 Transport::~Transport() { if (handle_!=INVALID_HANDLE_VALUE) CloseHandle(handle_); }
+void Transport::audio_present(bool present) {
+    LHDC_AUDIO_PRESENT_INPUT input{{sizeof(input),LHDC_ABI_VERSION},static_cast<ULONG>(present),0};
+    ioctl(IOCTL_LHDC_AUDIO_PRESENT,&input,sizeof(input),nullptr,0);
+}
 DWORD Transport::ioctl(DWORD code,void* input,DWORD input_size,void* output,DWORD output_size,DWORD timeout_ms) {
     OVERLAPPED overlapped{};
     overlapped.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
@@ -210,7 +221,12 @@ DWORD Transport::ioctl(DWORD code,void* input,DWORD input_size,void* output,DWOR
             if (GetOverlappedResult(handle_,&overlapped,&transferred,TRUE) && wait==WAIT_TIMEOUT) return transferred;
             throw WindowsError("Transport I/O wait",wait_error);
         }
-        if (!GetOverlappedResult(handle_,&overlapped,&transferred,FALSE)) win_error("Transport completion");
+        if (!GetOverlappedResult(handle_,&overlapped,&transferred,FALSE)) {
+            const auto error=GetLastError();
+            std::ostringstream operation;
+            operation<<"Transport completion (IOCTL=0x"<<std::hex<<code<<", NTSTATUS=0x"<<overlapped.Internal<<")";
+            throw WindowsError(operation.str().c_str(),error);
+        }
     }
     return transferred;
 }
@@ -259,13 +275,15 @@ std::int64_t Transport::PendingSend::pending_age_us() const {
     if (result!=WAIT_TIMEOUT) win_error("Send completion status");
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-submitted_).count();
 }
-SendTiming Transport::PendingSend::wait() {
+SendTiming Transport::PendingSend::wait(DWORD timeout_ms) {
     if (!active_) return timing_;
     // Completed requests may remain in the window until a later packet retires
     // them. Their retention time is not Bluetooth congestion.
     timing_.pending_age_us=pending_age_us();
     const auto started=std::chrono::steady_clock::now();
-    const auto result=WaitForSingleObject(overlapped_.hEvent,10000);
+    const auto age_ms=static_cast<std::uint64_t>(timing_.pending_age_us)/1000;
+    const auto remaining=age_ms>=timeout_ms ? 0 : timeout_ms-static_cast<DWORD>(age_ms);
+    const auto result=WaitForSingleObject(overlapped_.hEvent,remaining);
     const auto error=result==WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT;
     const auto waited=std::chrono::steady_clock::now();
     timing_.wait_us=std::chrono::duration_cast<std::chrono::microseconds>(waited-started).count();

@@ -1,10 +1,81 @@
 #include "audio/pcm_converter.hpp"
+#include "transport/radio.hpp"
+#include "transport/windows.hpp"
 #include <cmath>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+
+namespace {
+struct RadioState { DWORD status; bool connected; };
+struct RadioScenario {
+    std::vector<RadioState> radios;
+    std::size_t cursor=0,queries=0,closed=0,searches_closed=0;
+    bool fail_next=false;
+} scenario;
+constexpr std::uint64_t headphone_address=0x123456789abc;
+void require_radio(bool condition) {
+    if (!condition) throw std::runtime_error("Bluetooth radio selection or handle lifetime failed");
+}
+HBLUETOOTH_RADIO_FIND WINAPI first_radio(const BLUETOOTH_FIND_RADIO_PARAMS*,HANDLE* radio) {
+    if (scenario.radios.empty()) { SetLastError(ERROR_NO_MORE_ITEMS); return nullptr; }
+    *radio=reinterpret_cast<HANDLE>(1);
+    return reinterpret_cast<HBLUETOOTH_RADIO_FIND>(100);
+}
+BOOL WINAPI next_radio(HBLUETOOTH_RADIO_FIND,HANDLE* radio) {
+    if (scenario.fail_next) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
+    if (++scenario.cursor==scenario.radios.size()) { SetLastError(ERROR_NO_MORE_ITEMS); return FALSE; }
+    *radio=reinterpret_cast<HANDLE>(scenario.cursor+1);
+    return TRUE;
+}
+BOOL WINAPI finish_radios(HBLUETOOTH_RADIO_FIND) { ++scenario.searches_closed; return TRUE; }
+BOOL WINAPI close_radio(HANDLE) { ++scenario.closed; return TRUE; }
+DWORD WINAPI device_info(HANDLE radio,BLUETOOTH_DEVICE_INFO* info) {
+    require_radio(info->dwSize==sizeof(*info) && info->Address.ullLong==headphone_address);
+    const auto index=reinterpret_cast<std::uintptr_t>(radio)-1;
+    ++scenario.queries;
+    const auto state=scenario.radios.at(index);
+    if (state.status==ERROR_SUCCESS) {
+        info->fConnected=state.connected;
+        info->fRemembered=TRUE;
+        info->szName[0]=static_cast<wchar_t>(L'1'+index);
+    }
+    return state.status;
+}
+void check_radio_selection() {
+    const lhdc::detail::RadioApi api{first_radio,next_radio,finish_radios,device_info,close_radio};
+    auto query=[&](std::vector<RadioState> radios) {
+        scenario={std::move(radios)};
+        const auto result=lhdc::detail::query_connection(headphone_address,api);
+        require_radio(scenario.closed==scenario.queries);
+        require_radio(scenario.searches_closed==(scenario.radios.empty()?0u:1u));
+        return result;
+    };
+    const auto absent=query({});
+    require_radio(!absent.radio && !absent.known && !absent.device.fConnected);
+    const auto unknown=query({{ERROR_NOT_FOUND,false},{ERROR_NOT_FOUND,false}});
+    require_radio(unknown.radio && !unknown.known && scenario.queries==2);
+    const auto second=query({{ERROR_NOT_FOUND,false},{ERROR_SUCCESS,true}});
+    require_radio(second.known && second.device.fConnected && second.device.szName[0]==L'2');
+    const auto stale=query({{ERROR_SUCCESS,false},{ERROR_SUCCESS,true}});
+    require_radio(stale.device.fConnected && stale.device.szName[0]==L'2');
+    const auto disconnected=query({{ERROR_SUCCESS,false},{ERROR_NOT_FOUND,false}});
+    require_radio(disconnected.known && !disconnected.device.fConnected && disconnected.device.szName[0]==L'1');
+    const auto first=query({{ERROR_SUCCESS,true},{ERROR_SUCCESS,false}});
+    require_radio(first.device.fConnected && scenario.queries==1);
+    for (const auto fail_next:{false,true}) {
+        scenario={{{static_cast<DWORD>(fail_next?ERROR_NOT_FOUND:ERROR_ACCESS_DENIED),false}}};
+        scenario.fail_next=fail_next;
+        bool rejected=false;
+        try { lhdc::detail::query_connection(headphone_address,api); }
+        catch (const lhdc::WindowsError& error) { rejected=error.code==ERROR_ACCESS_DENIED; }
+        require_radio(rejected && scenario.closed==1 && scenario.searches_closed==1);
+    }
+}
+}
 int main() {
     try {
+        check_radio_selection();
         bool rejected=false;
         try { lhdc::PcmConverter wrong_rate(44100,24,false,{48000,24,400}); }
         catch (const std::invalid_argument&) { rejected=true; }

@@ -3,10 +3,12 @@
 #include <initguid.h>
 #include <devpkey.h>
 #include <lhdc_pcm.h>
+#include "audio_child.h"
 /* One audio function belongs to this specific Bluetooth Audio Sink devnode. */
-NTSTATUS LhdcCreateAudioChild(WDFDEVICE parent)
+NTSTATUS LhdcCreateAudioChild(WDFCHILDLIST list,
+    PWDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER identification,PWDFDEVICE_INIT init)
 {
-    PWDFDEVICE_INIT init=WdfPdoInitAllocate(parent);
+    WDFDEVICE parent=WdfChildListGetDevice(list);
     WDFDEVICE child;
     UNICODE_STRING id,instance,description,location,container;
     WDF_DEVICE_PNP_CAPABILITIES capabilities;
@@ -15,7 +17,7 @@ NTSTATUS LhdcCreateAudioChild(WDFDEVICE parent)
     GUID containerId;
     ULONG required;
     NTSTATUS status;
-    if (init==NULL) return STATUS_INSUFFICIENT_RESOURCES;
+    UNREFERENCED_PARAMETER(identification);
     RtlInitUnicodeString(&id,LHDC_AUDIO_HARDWARE_ID);
     RtlInitUnicodeString(&instance,L"Audio0");
     RtlInitUnicodeString(&description,L"Enco X4 LHDC Audio");
@@ -47,10 +49,22 @@ NTSTATUS LhdcCreateAudioChild(WDFDEVICE parent)
     capabilities.Address=0;
     capabilities.UINumber=0;
     WdfDeviceSetPnpCapabilities(child,&capabilities);
-    status=WdfFdoAddStaticChild(parent,child);
-    if (!NT_SUCCESS(status)) WdfObjectDelete(child);
-    return status;
+    return STATUS_SUCCESS;
 fail:
-    if (init!=NULL) WdfDeviceInitFree(init);
     return status;
+}
+NTSTATUS LhdcSetAudioPresent(WDFDEVICE parent,BOOLEAN present)
+{
+    LHDC_AUDIO_DESCRIPTION description;
+    WDFCHILDLIST list=WdfFdoGetDefaultChildList(parent);
+    RtlZeroMemory(&description,sizeof(description));
+    WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER_INIT(&description.Header,sizeof(description));
+    if (present) {
+        NTSTATUS status=WdfChildListAddOrUpdateChildDescriptionAsPresent(list,&description.Header,NULL);
+        return status==STATUS_OBJECT_NAME_EXISTS?STATUS_SUCCESS:status;
+    }
+    /* Scanning an empty bus also works before the first child has appeared. */
+    WdfChildListBeginScan(list);
+    WdfChildListEndScan(list);
+    return STATUS_SUCCESS;
 }

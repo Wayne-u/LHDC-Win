@@ -37,36 +37,22 @@ bool stopped(HANDLE stop) {
     if (result!=WAIT_OBJECT_0 && result!=WAIT_TIMEOUT) throw std::runtime_error("Service stop wait failed");
     return result==WAIT_OBJECT_0;
 }
-void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,const HfpActivity& hfp) {
+void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,const HfpActivity& hfp) {
     AudioTask priority; Pacer pacer;
     auto quality=profile;
     const auto revision=capability_revision();
-    MediaSession session(target_device().address,profile); session.discover();
-    const auto& caps=session.peer_capabilities();
-    const auto saved=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilities",REG_BINARY,caps.data(),static_cast<DWORD>(caps.size()));
-    if (saved!=ERROR_SUCCESS) throw std::runtime_error("Peer capability cache write failed, Win32="+std::to_string(saved));
-    const auto saved_revision=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilityRevision",REG_DWORD,&revision,sizeof(revision));
-    if(saved_revision!=ERROR_SUCCESS) throw WindowsError("Peer capability revision write",saved_revision);
+    // Keep AVRCP available for volume and Play while idle. AVDTP and its media
+    // channel belong to an actual render stream, not an unmonitored idle wait.
+    MediaSession session(target_device().address,profile);
     LHDC_PCM_STATE state{};
-    // Format probes can overwrite idle PCM metadata. Prepare using the last
-    // running format, then verify against the actual stream before sending.
-    profile=follow_pcm(quality,last_format.sample_rate,last_format.bits,false);
-    session.configure(profile);
-    const auto media_mtu=session.media_info().OutMtu;
-    const auto saved_mtu=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerMediaMtu",REG_DWORD,&media_mtu,sizeof(media_mtu));
-    if(saved_mtu!=ERROR_SUCCESS) throw WindowsError("Media MTU cache write",saved_mtu);
     auto next_hfp_check=std::chrono::steady_clock::now();
     while (!stopped(stop)) {
         session.check();
         if (!same(quality,service_profile()) || revision!=capability_revision()) return;
         state=pcm.state();
-        if (state.Running) {
-            last_format=follow_pcm(quality,state.SampleRate,state.Bits,state.FloatingPoint!=0);
-            if (!same(profile,last_format)) return;
-            break;
-        }
+        if (state.Running) break;
         if(std::chrono::steady_clock::now()>=next_hfp_check) {
-            if(hfp.active()) return;
+            if(hfp.active() || !bluetooth_connected(target_device().address)) return;
             next_hfp_check=std::chrono::steady_clock::now()+std::chrono::milliseconds(100);
         }
         if (WaitForSingleObject(stop,5)==WAIT_OBJECT_0) return;
@@ -74,6 +60,22 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
     if (stopped(stop)) return;
     session.check();
     if (state.Channels!=2 || state.BlockAlign!=2*(state.Bits/8)) throw std::runtime_error("Direct PCM requires interleaved stereo");
+    // Idle format probes do not select the codec. Use this render epoch's
+    // format and reject a stopped/replaced stream after Bluetooth negotiation.
+    profile=follow_pcm(quality,state.SampleRate,state.Bits,state.FloatingPoint!=0);
+    const auto preparing=std::chrono::steady_clock::now();
+    std::osyncstream(std::cout)<<"{\"event\":\"direct_audio_prepare\",\"epoch\":"<<state.Epoch
+        <<",\"input_sample_rate\":"<<state.SampleRate<<",\"input_bits\":"<<state.Bits<<"}"<<std::endl;
+    session.discover();
+    const auto& caps=session.peer_capabilities();
+    const auto saved=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilities",REG_BINARY,caps.data(),static_cast<DWORD>(caps.size()));
+    if (saved!=ERROR_SUCCESS) throw std::runtime_error("Peer capability cache write failed, Win32="+std::to_string(saved));
+    const auto saved_revision=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilityRevision",REG_DWORD,&revision,sizeof(revision));
+    if(saved_revision!=ERROR_SUCCESS) throw WindowsError("Peer capability revision write",saved_revision);
+    session.configure(profile);
+    const auto media_mtu=session.media_info().OutMtu;
+    const auto saved_mtu=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerMediaMtu",REG_DWORD,&media_mtu,sizeof(media_mtu));
+    if(saved_mtu!=ERROR_SUCCESS) throw WindowsError("Media MTU cache write",saved_mtu);
     auto adaptive=adaptive_bitrate_enabled();
     BitrateControl bitrate_control(profile,adaptive,clock_ms());
     auto encoding_profile=profile;
@@ -81,19 +83,26 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
     Encoder encoder(encoding_profile,session.media_info().OutMtu-media_header_bytes);
     Packetizer packetizer(session.media_info().OutMtu,encoder.block_samples());
     const std::size_t byte_rate=static_cast<std::size_t>(profile.sample_rate)*2*(profile.bits/8);
-    const auto preroll_bytes=byte_rate*60/1000;
+    const auto preroll_bytes=byte_rate*pcm_preroll_ms/1000;
     // Start can wait for the peer while Windows continues producing PCM.
     // Complete that exchange before discarding stale startup data and preroll.
+    const auto configured=pcm.state();
+    if(stopped(stop) || !configured.Running || configured.Epoch!=state.Epoch || hfp.active() ||
+        !same(quality,service_profile()) || revision!=capability_revision()) return;
     session.start(encoder.block_samples());
     // Preserve the beginning of a newly started render stream. Discard only
     // stale backlog accumulated while negotiating or restarting the encoder.
     const auto pending=pcm.state();
+    if(!pending.Running || pending.Epoch!=state.Epoch) return;
+    std::osyncstream(std::cout)<<"{\"event\":\"media_startup_complete\",\"epoch\":"<<state.Epoch
+        <<",\"setup_ms\":"<<std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-preparing).count()
+        <<",\"buffered_bytes\":"<<pending.BufferedBytes<<",\"kernel_dropped_bytes\":"<<pending.DroppedBytes<<"}"<<std::endl;
     if (pending.DroppedBytes || pending.BufferedBytes>static_cast<std::uint64_t>(pending.SampleRate)*pending.BlockAlign/10) pcm.reset();
     PcmReader reader([&](std::size_t count){return pcm.read(count);},[&]{pcm.reset();},state,profile);
     auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
     auto started=std::chrono::steady_clock::now();
     std::uint64_t frames=0,packets=0,bytes=0,nonzero_blocks=0;
-    std::uint64_t overrun_recoveries=0;
+    std::uint64_t discarded_frames=0,encoder_discarded_samples=0;
     std::uint64_t send_stalls=0;
     std::int64_t max_hfp_check_us=0;
     std::int64_t max_send_us=0,max_submit_us=0,max_io_wait_us=0,max_completion_us=0,max_pending_age_us=0,max_encode_us=0,max_wait_us=0,max_report_us=0,max_profile_us=0,max_state_us=0,max_log_us=0;
@@ -107,18 +116,18 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
         if (WaitForSingleObject(stop,2)==WAIT_OBJECT_0) return;
     }
     if (stopped(stop)) return;
-    // Catch up extra startup/recovery backlog while retaining the 60ms lead.
-    auto pace_origin=[&](const PcmReadStats& input) {
-        const auto extra=input.queue.queued>preroll_bytes ? input.queue.queued-preroll_bytes : 0;
-        const auto queued_frames=extra/(2*(profile.bits/8));
-        return std::chrono::steady_clock::now()-std::chrono::nanoseconds((frames*encoder.block_samples()+queued_frames)*1000000000ull/profile.sample_rate);
+    // Dropped PCM is already removed by the reader. Resume at real time;
+    // backdating by queued samples would burst old packets into the headset.
+    auto pace_origin=[&] {
+        return std::chrono::steady_clock::now()-std::chrono::nanoseconds(frames*encoder.block_samples()*1000000000ull/profile.sample_rate);
     };
-    started=pace_origin(reader.stats()); auto report=std::chrono::steady_clock::now();
+    started=pace_origin(); auto report=std::chrono::steady_clock::now();
     std::vector<std::uint8_t> block(encoder.block_bytes());
     bitrate_control=BitrateControl(profile,adaptive,clock_ms());
     publish_active_bitrate(encoder.bitrate());
     std::osyncstream(std::cout) << "{\"event\":\"direct_audio_started\",\"source\":\"WaveRT\",\"sample_rate\":" << profile.sample_rate << ",\"bits\":" << profile.bits << ",\"kbps\":" << encoder.bitrate()
         << ",\"ceiling_kbps\":"<<profile.kbps<<",\"adaptive_bitrate\":"<<(adaptive?"true":"false")
+        << ",\"preroll_ms\":"<<pcm_preroll_ms
         << ",\"input_sample_rate\":" << state.SampleRate << ",\"input_bits\":" << state.Bits << ",\"input_float\":" << (state.FloatingPoint?"true":"false")
         << ",\"media_send_window\":" << LHDC_MEDIA_SEND_WINDOW << ",\"resampling\":false}" << std::endl;
     ProgressLog progress(std::cout);
@@ -133,16 +142,27 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
         session.check();
         const auto input=reader.stats();
         if(input.epoch_changed) break;
-        if(input.overrun_recoveries!=overrun_recoveries) {
-            overrun_recoveries=input.overrun_recoveries;
-            started=pace_origin(input);
-        }
-        if (!reader.pop(block)) {
+        std::uint64_t block_discarded_frames=0;
+        if (!reader.pop(block,&block_discarded_frames)) {
             const auto empty=reader.stats();
             if(empty.finished) break;
             if (std::chrono::steady_clock::now()-empty.last_input>std::chrono::milliseconds(250)) throw std::runtime_error("Direct PCM producer stalled");
             if (WaitForSingleObject(stop,2)==WAIT_OBJECT_0) break;
             continue;
+        }
+        if(block_discarded_frames!=discarded_frames) {
+            // PCM time continues across dropped samples. Keep RTP on that
+            // timeline and discard any encoder frame buffered before the gap.
+            const auto buffered=encoder.buffered_samples();
+            const auto skipped=block_discarded_frames-discarded_frames+buffered;
+            packetizer.skip_samples(skipped);
+            encoding_profile.kbps=encoder.bitrate();
+            encoder=Encoder(encoding_profile,session.media_info().OutMtu-media_header_bytes);
+            encoder_discarded_samples+=buffered;
+            discarded_frames=block_discarded_frames;
+            started=pace_origin();
+            std::osyncstream(std::cout)<<"{\"event\":\"media_timeline_resync\",\"skipped_samples\":"<<skipped
+                <<",\"encoder_discarded_samples\":"<<buffered<<"}"<<std::endl;
         }
         if (std::any_of(block.begin(),block.end(),[](auto value){return value!=0;})) ++nonzero_blocks;
         const auto encode_started=std::chrono::steady_clock::now();
@@ -176,6 +196,11 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
             if (requested.sample_rate!=quality.sample_rate || requested.bits!=quality.bits || revision!=capability_revision()) break;
             const auto requested_adaptive=adaptive_bitrate_enabled();
             if (!same(quality,requested) || requested_adaptive!=adaptive) {
+                if(requested.kbps<quality.kbps && (reader.stats().recoveries()!=0 || send_stalls!=0)) {
+                    std::osyncstream(std::cout)<<"{\"event\":\"media_session_restart\",\"reason\":\"lower_ceiling_after_congestion\",\"previous_ceiling_kbps\":"<<quality.kbps
+                        <<",\"ceiling_kbps\":"<<requested.kbps<<"}"<<std::endl;
+                    break;
+                }
                 const auto selected=follow_pcm(requested,state.SampleRate,state.Bits,state.FloatingPoint!=0);
                 if (!session.supports_bitrate(selected)) break;
                 adaptive=requested_adaptive;
@@ -194,12 +219,13 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
             snapshot << "{\"event\":\"direct_audio_progress\",\"kbps\":"<<encoder.bitrate()<<",\"packets\":" << packets << ",\"bytes\":" << bytes << ",\"nonzero_blocks\":" << nonzero_blocks
                 << ",\"queue_ms\":" << 1000.0*capture.queue.queued/byte_rate << ",\"queue_limit_ms\":"<<pcm_queue_duration_ms<<",\"queue_high_water_bytes\":"<<capture.queue.high_water
                 << ",\"buffered_bytes\":" << info.BufferedBytes << ",\"produced_bytes\":" << info.ProducedBytes
-                << ",\"dropped_bytes\":" << info.DroppedBytes << ",\"dropped_bytes_total\":" << capture.dropped_bytes() << ",\"overrun_recoveries\":" << capture.overrun_recoveries
+                << ",\"dropped_bytes\":" << info.DroppedBytes << ",\"dropped_bytes_total\":" << capture.dropped_bytes()+encoder_discarded_samples*2*(profile.bits/8) << ",\"overrun_recoveries\":" << capture.overrun_recoveries << ",\"latency_recoveries\":" << capture.latency_recoveries
+                << ",\"timeline_skipped_samples\":"<<discarded_frames+encoder_discarded_samples
+                << ",\"encoder_discarded_pcm_bytes_total\":"<<encoder_discarded_samples*2*(profile.bits/8)
                 << ",\"kernel_dropped_bytes_total\":"<<capture.kernel_dropped_bytes<<",\"discarded_pcm_bytes_total\":"<<capture.discarded_bytes
                 << ",\"max_send_us\":" << max_send_us << ",\"max_submit_us\":"<<max_submit_us<<",\"max_io_wait_us\":"<<max_io_wait_us<<",\"max_completion_us\":"<<max_completion_us
                 << ",\"pending_age_us\":"<<timing.pending_age_us<<",\"max_pending_age_us\":"<<max_pending_age_us
                 << ",\"send_stalls\":"<<send_stalls<<",\"max_hfp_check_us\":"<<max_hfp_check_us<<",\"max_read_gap_us\":" << capture.max_read_gap_us << ",\"max_read_us\":" << capture.max_read_us
-                << ",\"max_queue_wait_us\":"<<capture.max_queue_wait_us
                 << ",\"max_encode_us\":" << max_encode_us << ",\"max_wait_us\":" << max_wait_us << ",\"max_report_us\":" << max_report_us << ",\"max_profile_us\":" << max_profile_us << ",\"max_state_us\":" << max_state_us << ",\"max_log_us\":" << max_log_us << "}";
             progress.submit(snapshot.str());
             max_log_us=std::max(max_log_us,elapsed_us(log_started));
@@ -223,9 +249,11 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
     progress.finish();
     const auto finished=session.finish();
     std::osyncstream(std::cout) << "{\"event\":\"direct_audio_complete\",\"packets\":" << packets << ",\"bytes\":" << bytes << ",\"completed_bytes\":" << finished.bytes
-        << ",\"nonzero_blocks\":" << nonzero_blocks << ",\"dropped_bytes_total\":" << capture.dropped_bytes() << ",\"overrun_recoveries\":" << capture.overrun_recoveries
+        << ",\"nonzero_blocks\":" << nonzero_blocks << ",\"dropped_bytes_total\":" << capture.dropped_bytes()+encoder_discarded_samples*2*(profile.bits/8) << ",\"overrun_recoveries\":" << capture.overrun_recoveries << ",\"latency_recoveries\":" << capture.latency_recoveries
+        << ",\"timeline_skipped_samples\":"<<discarded_frames+encoder_discarded_samples
+        << ",\"encoder_discarded_pcm_bytes_total\":"<<encoder_discarded_samples*2*(profile.bits/8)
         << ",\"kernel_dropped_bytes_total\":"<<capture.kernel_dropped_bytes<<",\"discarded_pcm_bytes_total\":"<<capture.discarded_bytes<<",\"queue_limit_ms\":"<<pcm_queue_duration_ms<<",\"queue_high_water_bytes\":"<<capture.queue.high_water
-        << ",\"max_read_gap_us\":"<<capture.max_read_gap_us<<",\"max_queue_wait_us\":"<<capture.max_queue_wait_us
+        << ",\"max_read_gap_us\":"<<capture.max_read_gap_us
         << ",\"max_send_us\":"<<max_send_us<<",\"max_submit_us\":"<<max_submit_us<<",\"max_io_wait_us\":"<<max_io_wait_us<<",\"max_completion_us\":"<<max_completion_us
         << ",\"max_pending_age_us\":"<<max_pending_age_us
         << ",\"send_stalls\":"<<send_stalls<<",\"max_hfp_check_us\":"<<max_hfp_check_us
@@ -235,9 +263,8 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,Profile& last_format,co
 }
 void serve_audio(HANDLE stop,unsigned duration_seconds) {
     ComApartment apartment(COINIT_MULTITHREADED);
-    HfpActivity hfp;
+    std::unique_ptr<HfpActivity> hfp;
     bool was_hfp=false;
-    auto last_format=service_profile();
     publish_active_bitrate(0);
     const auto started=std::chrono::steady_clock::now();
     std::jthread duration;
@@ -251,8 +278,15 @@ void serve_audio(HANDLE stop,unsigned duration_seconds) {
         bool retry=true;
         try {
             const auto profile=service_profile();
-            if (bluetooth_connected(target_device().address)) {
-                const bool calling=hfp.active();
+            const bool connected=bluetooth_connected(target_device().address);
+            sync_audio_connection(connected);
+            if (connected) {
+                claim_avrcp_controller();
+                // Bluetooth devnodes can appear after the automatic service
+                // starts. Initialize within the retry loop and rebuild watches
+                // after a disconnect so they belong to the current endpoints.
+                if (!hfp) hfp=std::make_unique<HfpActivity>();
+                const bool calling=hfp->active();
                 if(calling!=was_hfp) {
                     was_hfp=calling;
                     std::osyncstream(std::cout)<<"{\"event\":\"hfp_state\",\"active\":"<<(calling?"true":"false")<<"}"<<std::endl;
@@ -265,11 +299,16 @@ void serve_audio(HANDLE stop,unsigned duration_seconds) {
                 const auto path=find_direct_pcm();
                 if (path) {
                     DirectPcm pcm(*path);
-                    transfer(pcm,stop,profile,last_format,hfp);
+                    transfer(pcm,stop,profile,*hfp);
                     retry=false;
                 }
+            } else {
+                hfp.reset();
+                was_hfp=false;
             }
         } catch (const std::exception& error) {
+            hfp.reset();
+            was_hfp=false;
             std::cerr << "{\"event\":\"service_audio_error\",\"message\":" << json_string(error.what()) << "}" << std::endl;
         }
         publish_active_bitrate(0);

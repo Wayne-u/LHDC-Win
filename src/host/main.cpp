@@ -137,7 +137,7 @@ static void profile_options(const av::Bytes& raw,std::uint32_t mtu=0) {
 static int run(int argc,char** argv) {
     std::cout << std::unitbuf;
     try {
-        if (argc<2) throw std::invalid_argument("Usage: lhdc-host target | hires [on|off] | inspect | connection ADDRESS | audio-status | hfp-status | call-probe SECONDS | audio-devices | audio-inputs | direct-pcm | direct-formats | direct-capture SECONDS FILE | render-wav ENDPOINT WAV [REPEATS] | make-test-wav FILE [SECONDS [RATE BITS]] | encode WAV RECORDS [PAYLOAD_MTU [KBPS]] | packetize WAV RECORDS OUT_MTU KBPS | profile-check RATE BITS KBPS | profile-options HEX | configure HEX RATE BITS KBPS | decode-caps HEX");
+        if (argc<2) throw std::invalid_argument("Usage: lhdc-host target | hires [on|off] | inspect | connection ADDRESS | audio-connection | audio-detach | audio-status | hfp-status | call-probe SECONDS | audio-devices | audio-inputs | direct-pcm | direct-formats | direct-capture SECONDS FILE | render-wav ENDPOINT WAV [REPEATS] | make-test-wav FILE [SECONDS [RATE BITS]] | encode WAV RECORDS [PAYLOAD_MTU [KBPS]] | packetize WAV RECORDS OUT_MTU KBPS | profile-check RATE BITS KBPS | profile-options HEX | configure HEX RATE BITS KBPS | decode-caps HEX");
         const std::string command=argv[1];
         if (command=="make-test-wav" && (argc==3 || argc==4 || argc==6 || argc==7)) {
             const std::string option=argc==7?argv[6]:"";
@@ -166,6 +166,11 @@ static int run(int argc,char** argv) {
         else if (command=="hires" && argc==3 && (std::string(argv[2])=="on" || std::string(argv[2])=="off"))
             lhdc::inspect_hi_res(std::string(argv[2])=="on");
         else if (command=="direct-pcm" && argc==2) lhdc::inspect_direct_pcm();
+        else if (command=="audio-connection" && argc==2) lhdc::inspect_audio_connection();
+        else if (command=="audio-detach" && argc==2) {
+            lhdc::sync_audio_connection(false);
+            std::cout<<"{\"event\":\"audio_detached\"}\n";
+        }
         else if (command=="direct-formats" && argc==2) lhdc::inspect_direct_formats();
         else if (command=="direct-capture" && argc==4) lhdc::capture_direct_pcm(number(argv[2]),file_path(argv[3]));
         else if (command=="audio-status" && argc==2) lhdc::inspect_audio_service();

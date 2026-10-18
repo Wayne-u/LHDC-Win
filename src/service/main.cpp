@@ -5,12 +5,17 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <memory>
+#include <shlobj.h>
 namespace {
 SERVICE_STATUS_HANDLE status_handle=nullptr;
 SERVICE_STATUS status{SERVICE_WIN32_OWN_PROCESS,SERVICE_START_PENDING,0,NO_ERROR,0,0,5000};
 HANDLE stop_event=nullptr;
 DWORD run_logged(HANDLE stop,bool supervisor) {
-    std::ofstream log(L"C:\\ProgramData\\LHDC-Win\\service.jsonl",std::ios::binary|std::ios::app);
+    PWSTR directory=nullptr;
+    if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData,0,nullptr,&directory))) return ERROR_PATH_NOT_FOUND;
+    std::unique_ptr<wchar_t,decltype(&CoTaskMemFree)> memory(directory,&CoTaskMemFree);
+    std::ofstream log(std::filesystem::path(directory)/L"LHDC-Win"/L"service.jsonl",std::ios::binary|std::ios::app);
     if(!log) return ERROR_OPEN_FAILED;
     const auto out=std::cout.rdbuf(log.rdbuf()),err=std::cerr.rdbuf(log.rdbuf());
     DWORD result=NO_ERROR;

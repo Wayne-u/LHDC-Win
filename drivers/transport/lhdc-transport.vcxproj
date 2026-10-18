@@ -17,7 +17,8 @@
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
     <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
-    <KmdfVersion>1.35</KmdfVersion>
+    <KmdfVersion>1.33</KmdfVersion>
+    <_NT_TARGET_VERSION>0xA00000C</_NT_TARGET_VERSION>
     <SignMode>Off</SignMode>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
@@ -26,7 +27,7 @@
     <OutDir>$(ProjectDir)..\..\build\driver\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)..\..\build\driver\obj\$(Configuration)\</IntDir>
     <EnableInf2Cat>true</EnableInf2Cat>
-    <Inf2CatWindowsVersionList>10_GE_X64</Inf2CatWindowsVersionList>
+    <Inf2CatWindowsVersionList>10_NI_X64,10_GE_X64</Inf2CatWindowsVersionList>
     <!-- WDK 28000's managed PackageVerifier throws NullReferenceException here.
          Run the installed native verifier with strict Windows Driver rules. -->
     <SkipPackageVerification>true</SkipPackageVerification>

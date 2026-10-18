@@ -6,6 +6,9 @@ Packetizer::Packetizer(std::uint32_t mtu,std::uint32_t samples,std::uint16_t seq
     :mtu_(mtu),block_samples_(samples),timestamp_(timestamp),sequence_(sequence),media_sequence_(media_sequence) {
     if (mtu<=media_header_bytes || !samples) throw std::invalid_argument("Invalid media MTU or block duration");
 }
+void Packetizer::skip_samples(std::uint64_t samples) {
+    timestamp_+=static_cast<std::uint32_t>(samples);
+}
 std::vector<std::uint8_t> Packetizer::pack(const EncodedPacket& packet) {
     if (packet.payload.empty() && packet.frames==0) return {};
     if (packet.payload.empty() || !packet.frames || packet.frames>63 || packet.payload.size()>mtu_-media_header_bytes)

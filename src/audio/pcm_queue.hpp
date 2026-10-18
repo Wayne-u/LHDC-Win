@@ -13,6 +13,7 @@ public:
     PcmQueue(std::size_t capacity,std::size_t frame_bytes);
     void push(std::span<const std::uint8_t> pcm);
     bool pop(std::span<std::uint8_t> pcm);
+    std::size_t trim(std::size_t retained_bytes);
     QueueStats stats() const { return stats_; }
 private:
     std::vector<std::uint8_t> buffer_;

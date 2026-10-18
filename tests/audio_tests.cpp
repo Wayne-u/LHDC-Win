@@ -32,6 +32,11 @@ int main() {
         require(full.stats().overruns==1 && full.stats().queued==8,"Overrun does not overwrite buffered audio");
         std::array<std::uint8_t,8> old{};
         require(full.pop(old) && std::equal(old.begin(),old.end(),input.begin()),"Buffered audio survives rejected overrun");
+        queue.push(std::span(input).first(24));
+        require(queue.trim(8)==16,"Latency trim reports discarded oldest PCM");
+        require(queue.pop(old) && std::equal(old.begin(),old.end(),input.begin()+16),"Latency trim retains the latest complete frames through ring wrap");
+        require(queue.trim(8)==0,"Trimming an empty queue does not invent loss");
+        rejects([&]{queue.trim(3);});
         const auto path=std::filesystem::current_path()/"audio-roundtrip.wav";
         for (const auto bits:{16u,24u}) {
             lhdc::Wav wav{44100,bits,{}};

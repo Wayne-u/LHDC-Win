@@ -1,5 +1,7 @@
 #include "direct_pcm.hpp"
 #include "transport/windows.hpp"
+#include "windows_audio.hpp"
+#include <lhdc_connection.h>
 #include "host/json.hpp"
 #include <setupapi.h>
 #include <cfgmgr32.h>
@@ -15,6 +17,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <syncstream>
 namespace lhdc {
 namespace {
 [[noreturn]] void pcm_error(const char* operation) { throw WindowsError(operation,GetLastError()); }
@@ -29,7 +32,7 @@ struct DeviceSet {
     ~DeviceSet() { SetupDiDestroyDeviceInfoList(value); }
 };
 }
-std::optional<std::wstring> find_direct_pcm() {
+static std::optional<std::wstring> find_audio_filter(const std::wstring& suffix) {
     DeviceSet set;
     std::optional<std::wstring> found;
     for (DWORD i=0;;++i) {
@@ -53,12 +56,47 @@ std::optional<std::wstring> find_direct_pcm() {
             throw std::runtime_error("Audio child parent lookup failed");
         if (_wcsicmp(instance.data(),target_device().instance.c_str())!=0) continue;
         const std::wstring path=detail->DevicePath;
-        constexpr wchar_t suffix[]=L"\\WaveSpeaker";
-        if (path.size()<std::size(suffix)-1 || _wcsicmp(path.c_str()+path.size()-(std::size(suffix)-1),suffix)!=0) continue;
-        if (found) throw std::runtime_error("More than one PCM interface belongs to the target headphones");
+        if (path.size()<suffix.size() || _wcsicmp(path.c_str()+path.size()-suffix.size(),suffix.c_str())!=0) continue;
+        if (found) throw std::runtime_error("More than one audio filter belongs to the target headphones");
         found=path;
     }
     return found;
+}
+std::optional<std::wstring> find_direct_pcm() { return find_audio_filter(L"\\WaveSpeaker"); }
+void sync_audio_connection(bool connected) {
+    if (connected) {
+        Transport transport(target_device().address);
+        transport.audio_present(true);
+    }
+    const auto path=find_audio_filter(L"\\TopologySpeaker");
+    if (path) {
+        const auto handle=CreateFileW(path->c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        if (handle==INVALID_HANDLE_VALUE) pcm_error("Audio topology filter open");
+        AudioHandle filter(handle);
+        KSPROPERTY request{KSPROPSETID_LHDC_CONNECTION,LHDC_CONNECTION_STATUS,KSPROPERTY_TYPE_GET};
+        LHDC_CONNECTION_STATE state{};
+        DWORD returned=0;
+        if (!DeviceIoControl(filter.get(),IOCTL_KS_PROPERTY,&request,sizeof(request),&state,sizeof(state),&returned,nullptr)) pcm_error("Audio connection query");
+        if (returned!=sizeof(state) || state.Size!=sizeof(state) || state.Version!=LHDC_CONNECTION_ABI_VERSION || state.Connected>1)
+            throw std::runtime_error("Invalid audio connection state");
+        if ((state.Connected!=0)!=connected) {
+            state.Connected=connected;
+            request.Flags=KSPROPERTY_TYPE_SET;
+            if (!DeviceIoControl(filter.get(),IOCTL_KS_PROPERTY,&request,sizeof(request),&state,sizeof(state),&returned,nullptr)) pcm_error("Audio connection update");
+            std::osyncstream(std::cout)<<"{\"event\":\"audio_connection_changed\",\"connected\":"<<(connected?"true":"false")<<"}"<<std::endl;
+        }
+    }
+    // Notify Endpoint Builder and invalidate audio clients before removing the
+    // PDO. Opening the topology after marking it missing races PnP removal.
+    if (!connected) {
+        Transport transport(target_device().address);
+        transport.audio_present(false);
+    }
+}
+void inspect_audio_connection() {
+    const bool connected=bluetooth_connected(target_device().address);
+    sync_audio_connection(connected);
+    std::cout<<"{\"event\":\"audio_connection\",\"connected\":"<<(connected?"true":"false")<<"}\n";
 }
 DirectPcm::DirectPcm(const std::wstring& path) {
     handle_=CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);

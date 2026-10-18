@@ -19,7 +19,7 @@ public partial class MainWindow : Window {
     private int sampleRate = 48000, bits = 24, preferredKbps = 400;
     private bool initializing = true, busy, refreshing, updatingParameters;
     private bool audioServiceRunning, profileEditable, modePendingConnection;
-    private bool formatEdited, bitrateEdited;
+    private bool formatEdited, bitrateEdited, modeEdited, updatingMode;
     private bool deviceAvailable;
     private bool headphoneConnected;
     private bool? hiResEnabled;
@@ -111,7 +111,19 @@ public partial class MainWindow : Window {
         Edited();
     }
 
-    private void ModeChanged(object sender, SelectionChangedEventArgs e) { if (!initializing) Edited(); }
+    private void ModeChanged(object sender, SelectionChangedEventArgs e) {
+        if (initializing || updatingMode) return;
+        modeEdited = true;
+        modePendingConnection = false;
+        Edited();
+    }
+    private void SyncModeSelection() {
+        int actual = service == "BthA2dp" ? 1 : service == "lhdc-transport" ? 0 : -1;
+        if (actual < 0 || modeEdited) return;
+        updatingMode = true;
+        try { ModeBox.SelectedIndex = actual; }
+        finally { updatingMode = false; }
+    }
     private void AdaptiveBitrateChanged(object sender, RoutedEventArgs e) {
         if (initializing) return;
         bitrateEdited = true;
@@ -186,6 +198,7 @@ public partial class MainWindow : Window {
         var target = deviceAvailable ? inventory["devices"]!.AsArray().FirstOrDefault(d =>
             d!["instance_id"]!.GetValue<string>().Equals(discovery["instance"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase)) : null;
         service = target?["service"]?.GetValue<string>() ?? "";
+        SyncModeSelection();
         int problem = target?["problem"]?.GetValue<int>() ?? -1;
         audioServiceRunning = audio["running"]!.GetValue<bool>();
         profileEditable = audio["profile_editable"]?.GetValue<bool>() == true;
@@ -281,17 +294,19 @@ public partial class MainWindow : Window {
     }, "正在刷新设备…");
 
     private async void SaveClick(object sender, RoutedEventArgs e) => await Operate(async () => {
+        modePendingConnection = false;
         if (ModeBox.SelectedIndex == 1) await ApplyMode("Windows");
         else {
             Log((await ValidateProfile()).ToJsonString());
             var installed = NativeClient.InstalledProfile();
             bool sameFormat = installed?.SampleRate == sampleRate && installed.Bits == bits;
-            if (service == "lhdc-transport" && audioServiceRunning && profileEditable && sameFormat)
+            if (service == "lhdc-transport" && audioServiceRunning && profileEditable && sameFormat && client!.ServiceBinaryCurrent())
                 NativeClient.ApplyCodecProfile(StoredProfile());
             else await ApplyMode("LHDC");
         }
         formatEdited = false;
         bitrateEdited = false;
+        modeEdited = false;
         ProfileStore.Save(StoredProfile());
         if (modePendingConnection)
             StatusText.Text = ModeBox.SelectedIndex == 0 ? "LHDC 驱动已选择，等待耳机连接" : "Windows 驱动已选择，等待耳机连接";
@@ -301,11 +316,16 @@ public partial class MainWindow : Window {
 
     private async Task ApplyMode(string mode) {
         var resultFile = Path.Combine(ProfileStore.DirectoryPath, $"mode-{DateTime.Now:yyyyMMdd-HHmmss-fff}.json");
-        var result = await client!.SetAudioMode(mode, StoredProfile(), resultFile);
-        modePendingConnection = result["StereoVerificationPending"]?.GetValue<bool>() == true
-            || result["FormatVerificationPending"]?.GetValue<bool>() == true;
-        Log(result.ToJsonString());
-        await Refresh();
+        try {
+            var result = await client!.SetAudioMode(mode, StoredProfile(), resultFile);
+            modePendingConnection = result["StereoVerificationPending"]?.GetValue<bool>() == true
+                || result["FormatVerificationPending"]?.GetValue<bool>() == true;
+            Log(result.ToJsonString());
+        }
+        finally {
+            modeEdited = false;
+            await Refresh();
+        }
     }
 
     private async Task Operate(Func<Task> action, string message) {

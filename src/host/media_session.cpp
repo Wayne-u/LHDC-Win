@@ -6,11 +6,13 @@
 #include <algorithm>
 namespace av=lhdc::avdtp;
 namespace lhdc {
+constexpr DWORD media_send_timeout_ms=500;
 static void cleanup_error(const char* event,const std::exception& error) {
     std::osyncstream(std::cerr) << "{\"event\":" << json_string(event) << ",\"message\":" << json_string(error.what()) << "}" << std::endl;
 }
+MediaSession::MediaSession(std::uint64_t remote,Profile profile)
+    :transport_(remote),volume_(std::make_unique<VolumeSync>(transport_)),protocol_(transport_,profile),profile_(profile) {}
 void MediaSession::discover() {
-    volume_=std::make_unique<VolumeSync>(transport_);
     transport_.open();
     const auto info=transport_.info();
     std::osyncstream(std::cout) << "{\"event\":\"channel_open\",\"channel_id\":1,\"in_mtu\":" << info.InMtu << ",\"out_mtu\":" << info.OutMtu << "}\n";
@@ -75,7 +77,9 @@ SendTiming MediaSession::send(std::span<const std::uint8_t> sdu) {
     // Submit in RTP order and retire the oldest first. The shared window bounds
     // user buffers and driver requests while Bluetooth completions are delayed.
     if (pending_media_.size()==LHDC_MEDIA_SEND_WINDOW) {
-        timing=pending_media_.front()->wait();
+        // Include time already spent in the send window. A stalled media
+        // channel must be rebuilt instead of feeding seconds-old RTP later.
+        timing=pending_media_.front()->wait(media_send_timeout_ms);
         pending_media_.pop_front();
     }
     auto request=transport_.begin_send(sdu,LHDC_CHANNEL_MEDIA);
@@ -95,7 +99,7 @@ void MediaSession::stop_monitor() {
 }
 SessionCompletion MediaSession::finish() {
     while (!pending_media_.empty()) {
-        pending_media_.front()->wait();
+        pending_media_.front()->wait(media_send_timeout_ms);
         pending_media_.pop_front();
     }
     volume_.reset();

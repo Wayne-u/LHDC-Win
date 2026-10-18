@@ -9,6 +9,7 @@
 #include <bthguid.h>
 #include <lhdc_transport.h>
 #include "trace.h"
+#include "audio_child.h"
 #include "transport.tmh"
 
 typedef struct DEVICE_CONTEXT DEVICE_CONTEXT;
@@ -57,7 +58,6 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL RouteControl;
 EVT_WDF_IO_QUEUE_IO_STOP IoStop;
 EVT_WDF_REQUEST_COMPLETION_ROUTINE BrbComplete;
 EVT_WDF_WORKITEM DisconnectWorker;
-NTSTATUS LhdcCreateAudioChild(WDFDEVICE parent);
 
 static NTSTATUS SendSdpIoctl(DEVICE_CONTEXT* ctx, ULONG code, PVOID input,
     ULONG inputSize, PVOID output, ULONG outputSize)
@@ -303,10 +303,13 @@ NTSTATUS DeviceAdd(WDFDRIVER driver, PWDFDEVICE_INIT init)
     WDF_FILEOBJECT_CONFIG files;
     WDF_IO_QUEUE_CONFIG queue;
     WDF_WORKITEM_CONFIG work;
+    WDF_CHILD_LIST_CONFIG children;
     DEVICE_CONTEXT* ctx;
     NTSTATUS status;
     ULONG i;
     UNREFERENCED_PARAMETER(driver);
+    WDF_CHILD_LIST_CONFIG_INIT(&children,sizeof(LHDC_AUDIO_DESCRIPTION),LhdcCreateAudioChild);
+    WdfFdoInitSetDefaultChildListConfig(init,&children,WDF_NO_OBJECT_ATTRIBUTES);
     WdfDeviceInitSetExclusive(init, TRUE);
     WdfDeviceInitSetIoType(init, WdfDeviceIoBuffered);
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnp);
@@ -366,7 +369,7 @@ NTSTATUS DeviceAdd(WDFDRIVER driver, PWDFDEVICE_INIT init)
     }
     status = WdfDeviceCreateDeviceInterface(device, &GUID_DEVINTERFACE_LHDC_TRANSPORT, NULL);
     if (!NT_SUCCESS(status)) return status;
-    return LhdcCreateAudioChild(device);
+    return LhdcSetAudioPresent(device,TRUE);
 }
 NTSTATUS PrepareHardware(WDFDEVICE device, WDFCMRESLIST raw, WDFCMRESLIST translated)
 {
@@ -548,6 +551,13 @@ VOID RouteControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t i
     status = WdfRequestRetrieveInputBuffer(request, sizeof(*header), (PVOID*)&header, NULL);
     if (!NT_SUCCESS(status)) goto fail;
     if (header->Version != LHDC_ABI_VERSION || header->Size != inLength) { status = STATUS_INVALID_PARAMETER; goto fail; }
+    if (code == IOCTL_LHDC_AUDIO_PRESENT) {
+        LHDC_AUDIO_PRESENT_INPUT* input = (LHDC_AUDIO_PRESENT_INPUT*)header;
+        if (inLength != sizeof(*input) || input->Present > 1 || input->Reserved != 0) { status = STATUS_INVALID_PARAMETER; goto fail; }
+        status = LhdcSetAudioPresent(ctx->Device,input->Present != 0);
+        WdfRequestComplete(request,status);
+        return;
+    }
     if (code == IOCTL_LHDC_OPEN) {
         LHDC_OPEN_INPUT* input = (LHDC_OPEN_INPUT*)header;
         if (inLength != sizeof(*input) || input->Reserved != 0) { status = STATUS_INVALID_PARAMETER; goto fail; }
