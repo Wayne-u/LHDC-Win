@@ -16,11 +16,12 @@ public partial class MainWindow : Window {
     private NativeClient? client;
     private JsonArray? rates, bitDepths;
     private string peerCaps = "", service = "", logFile = "";
-    private int sampleRate = 48000, bits = 24, preferredKbps = 400;
+    private int sampleRate = 48000, bits = 16, preferredKbps = 400;
     private bool initializing = true, busy, refreshing, updatingParameters;
     private bool audioServiceRunning, profileEditable, modePendingConnection;
     private bool formatEdited, bitrateEdited, modeEdited, updatingMode;
     private bool deviceAvailable;
+    private bool updatingDevices;
     private bool headphoneConnected;
     private bool? hiResEnabled;
     private int mediaMtu;
@@ -50,11 +51,12 @@ public partial class MainWindow : Window {
             initializing = false;
             StatusText.Text = "就绪";
             statusTimer.Tick += async (_, _) => {
-                if (busy || refreshing) return;
+                if (busy || refreshing || DeviceBox.IsDropDownOpen) return;
                 refreshing = true;
+                UpdateControls();
                 try { await Refresh(false); }
                 catch (Exception error) { DriverText.Text = "设备状态暂不可用"; Log(error.ToString()); }
-                finally { refreshing = false; }
+                finally { refreshing = false; UpdateControls(); }
             };
             statusTimer.Start();
         }, "正在读取设备与配置…");
@@ -90,8 +92,8 @@ public partial class MainWindow : Window {
         finally { updatingParameters = false; }
     }
     private void UpdateFormats() {
-        var supportedRates = rates?.Select(r => r!["sample_rate"]!.GetValue<int>()).ToArray() ?? [sampleRate];
-        var supportedDepths = bitDepths?.Select(b => b!.GetValue<int>()).ToArray() ?? [bits];
+        var supportedRates = rates?.Select(r => r!["sample_rate"]!.GetValue<int>()).ToArray() ?? [44100,48000,96000,192000];
+        var supportedDepths = bitDepths?.Select(b => b!.GetValue<int>()).ToArray() ?? [16,24];
         updatingParameters = true;
         try {
             SampleRateBox.ItemsSource = supportedRates.Select(r => new Choice(r, $"{(r / 1000.0).ToString("0.#", CultureInfo.InvariantCulture)} kHz")).ToArray();
@@ -117,6 +119,19 @@ public partial class MainWindow : Window {
         modePendingConnection = false;
         Edited();
     }
+    private async void DeviceChanged(object sender, SelectionChangedEventArgs e) {
+        if (initializing || updatingDevices || busy || refreshing || client is null || DeviceBox.SelectedItem is not DeviceChoice choice) return;
+        client.DeviceInstance = choice.Instance;
+        peerCaps = ""; rates = null; bitDepths = null; mediaMtu = 0;
+        headphoneConnected = false; hiResEnabled = null;
+        sampleRate = 48000; bits = 16; preferredKbps = 400;
+        formatEdited = true; bitrateEdited = true; modeEdited = false;
+        UpdateFormats(); UpdateBitrates();
+        await Operate(async () => {
+            await Refresh();
+            StatusText.Text = "已选择耳机；安装时验证 LHDC V5 播放能力";
+        }, "正在读取耳机…");
+    }
     private void SyncModeSelection() {
         int actual = service == "BthA2dp" ? 1 : service == "lhdc-transport" ? 0 : -1;
         if (actual < 0 || modeEdited) return;
@@ -140,8 +155,9 @@ public partial class MainWindow : Window {
         if (!busy) StatusText.Text = "设置已修改，等待应用";
     }
     private void UpdateControls() {
-        bool ready = !initializing && !busy;
+        bool ready = !initializing && !busy && !refreshing;
         bool lhdc = ModeBox.SelectedIndex == 0;
+        DeviceBox.IsEnabled = ready;
         ModeBox.IsEnabled = ready;
         ParameterGrid.IsEnabled = ready;
         ParameterGrid.Visibility = lhdc ? Visibility.Visible : Visibility.Collapsed;
@@ -149,7 +165,8 @@ public partial class MainWindow : Window {
         FormatSelectors.IsEnabled = ready;
         FormatText.Visibility = lhdc ? Visibility.Collapsed : Visibility.Visible;
         FormatHint.Text = lhdc ? "格式切换会短暂中断音频。" : "在 Windows 声音设置中调整";
-        ModeHint.Visibility = lhdc ? Visibility.Collapsed : Visibility.Visible;
+        ModeHint.Visibility = Visibility.Visible;
+        ModeHint.Text = lhdc ? "安装时验证耳机的 LHDC V5 能力；不兼容会恢复 Windows 音频。" : "编码方式由 Windows 管理。";
         SaveButton.IsEnabled = ready && deviceAvailable && (!lhdc || BitrateBox.SelectedItem is Choice && SampleRateBox.SelectedItem is Choice && BitDepthBox.SelectedItem is Choice);
         RefreshButton.IsEnabled = ready;
         HiResBox.IsEnabled = ready && headphoneConnected && hiResEnabled.HasValue;
@@ -163,7 +180,16 @@ public partial class MainWindow : Window {
     }
 
     private async Task Refresh(bool writeLog = true) {
-        var discovery = await client!.Host("target");
+        var targets = await client!.Host("targets");
+        var choices = targets["devices"]!.AsArray().Select(d => new DeviceChoice(d!["instance"]!.GetValue<string>(),
+            d["name"]!.GetValue<string>(), d["address"]!.GetValue<string>())).ToArray();
+        var desired = client.DeviceInstance.Length > 0 ? client.DeviceInstance : targets["selected_instance"]!.GetValue<string>();
+        var selectedDevice = choices.FirstOrDefault(d => d.Instance.Equals(desired, StringComparison.OrdinalIgnoreCase));
+        updatingDevices = true;
+        try { DeviceBox.ItemsSource = choices; DeviceBox.SelectedItem = selectedDevice; }
+        finally { updatingDevices = false; }
+        client.DeviceInstance = selectedDevice?.Instance ?? "";
+        var discovery = selectedDevice is not null ? await client.Host("target") : new JsonObject { ["found"] = false };
         deviceAvailable = discovery["found"]!.GetValue<bool>();
         var connection = deviceAvailable
             ? await client.Host("connection", discovery["address"]!.GetValue<string>())
@@ -176,9 +202,11 @@ public partial class MainWindow : Window {
             Log(audio.ToJsonString());
         }
         bool connected = connection["connected"]!.GetValue<bool>();
-        bool readHiRes = connected && (writeLog || !headphoneConnected);
+        bool heyMelody = discovery["hey_melody"]?.GetValue<bool>() == true;
+        HiResRow.Visibility = heyMelody ? Visibility.Visible : Visibility.Collapsed;
+        bool readHiRes = heyMelody && connected && (writeLog || !headphoneConnected);
         headphoneConnected = connected;
-        if (!connected) {
+        if (!connected || !heyMelody) {
             hiResEnabled = null;
             HiResBox.IsChecked = null;
             HiResHint.Text = "连接耳机后读取";
@@ -205,7 +233,7 @@ public partial class MainWindow : Window {
         int activeKbps = audio["active_kbps"]?.GetValue<int>() ?? 0;
         ActiveBitrateText.Text = activeKbps > 0 ? $"当前播放：{activeKbps} kbps" : "";
         ActiveBitrateText.Visibility = activeKbps > 0 ? Visibility.Visible : Visibility.Collapsed;
-        DriverText.Text = target is null || problem != 0 ? "音频设备暂不可用"
+        DriverText.Text = selectedDevice is null ? "请选择已配对的蓝牙耳机" : target is null || problem != 0 ? "音频设备暂不可用"
             : service == "BthA2dp" ? "Windows 标准音频"
             : service == "lhdc-transport" && audioServiceRunning ? "LHDC V5" : "LHDC V5 · 服务未运行";
 
@@ -232,10 +260,9 @@ public partial class MainWindow : Window {
         }
         var devices = await client.Host("audio-devices");
         var endpoint = devices["devices"]!.AsArray().FirstOrDefault(d => {
-            var name = d!["name"]!.GetValue<string>();
-            return name.Contains("Enco X4", StringComparison.OrdinalIgnoreCase)
+            return deviceAvailable && d!["container_id"]!.GetValue<string>().Equals(discovery["container_id"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase)
                 && d["channels"]!.GetValue<int>() == 2
-                && name.Contains("LHDC", StringComparison.OrdinalIgnoreCase) == (service == "lhdc-transport");
+                && d["adapter_id"]!.GetValue<string>().Contains("lhdcwin#audio#", StringComparison.OrdinalIgnoreCase) == (service == "lhdc-transport");
         });
         if (endpoint is not null) {
             int rate = endpoint["device_sample_rate"]!.GetValue<int>();

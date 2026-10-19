@@ -124,8 +124,9 @@ std::uint32_t capability_revision() {
     return value;
 }
 void inspect_hi_res(std::optional<bool> desired) {
+    if (!target_device().hey_melody) throw std::runtime_error("HeyMelody Hi-Res control is not available for the selected headphones; playback uses AVDTP capabilities");
     const auto address=target_device().address;
-    if(!bluetooth_connected(address)) throw std::runtime_error("Connect Enco X4 before querying Hi-Res");
+    if(!bluetooth_connected(address)) throw std::runtime_error("Connect the selected headphones before querying Hi-Res");
     if(desired==false) {
         Profile profile{};DWORD size=sizeof(profile);
         const auto error=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"Profile",RRF_RT_REG_BINARY,nullptr,&profile,&size);

@@ -117,11 +117,12 @@ void inspect_audio_devices(bool capture) {
         audio_check(volume->GetMasterVolumeLevelScalar(&scalar),"Audio endpoint volume query");
         audio_check(volume->GetMasterVolumeLevel(&db),"Audio endpoint decibel query");
         audio_check(volume->GetMute(&muted),"Audio endpoint mute query");
+        DWORD volume_support=0;audio_check(volume->QueryHardwareSupport(&volume_support),"Audio endpoint gain topology");
         if (!first) out << ','; first=false;
         out << "{\"id\":" << json_string(id) << ",\"name\":" << json_string(name) << ",\"default\":" << (id==default_id?"true":"false")
             << ",\"sample_rate\":" << format->nSamplesPerSec << ",\"bits\":" << format->wBitsPerSample << ",\"channels\":" << format->nChannels
             << ",\"device_sample_rate\":" << output_format.nSamplesPerSec << ",\"device_bits\":" << output_format.wBitsPerSample << ",\"adapter_id\":" << json_string(adapter) << ",\"container_id\":"<<json_string(audio_utf8(container))
-            << ",\"volume_scalar\":" << scalar << ",\"volume_db\":" << db << ",\"muted\":" << (muted?"true":"false") << '}';
+            << ",\"volume_scalar\":" << scalar << ",\"volume_db\":" << db << ",\"volume_hardware_support\":"<<volume_support<<",\"muted\":" << (muted?"true":"false") << '}';
         } catch (const AudioError& error) {
             // Endpoint removal and the audio endpoint builder are asynchronous.
             // Report that exact stale entry while retaining the active devices.

@@ -59,9 +59,10 @@ void readiness() {
 }
 class Target {
 public:
-    explicit Target(const wchar_t* instance) {
-        // Resolve the supported physical device independently before any operation.
-        if (!equal(instance,lhdc::target_device().instance)) throw std::invalid_argument("Only the automatically detected Enco X4 Audio Sink instance is allowed");
+    explicit Target(const wchar_t* instance):instance_(instance) {
+        const auto devices=lhdc::discover_targets();
+        if (std::none_of(devices.begin(),devices.end(),[&](const auto& device){return equal(instance,device.instance);}))
+            throw std::invalid_argument("Only an enumerated, paired Bluetooth Audio Sink instance is allowed");
         set_=SetupDiCreateDeviceInfoList(nullptr,nullptr);
         if (set_==INVALID_HANDLE_VALUE) win_error("Device set");
         data_.cbSize=sizeof(data_);
@@ -121,7 +122,7 @@ public:
         const auto service=property(DEVPKEY_Device_Service);
         const auto inf=property(DEVPKEY_Device_DriverInfPath);
         const auto code=problem();
-        std::cout << "{\"event\":" << lhdc::json_string(event) << ",\"instance_id\":" << lhdc::json_string(utf8(lhdc::target_device().instance.c_str()))
+        std::cout << "{\"event\":" << lhdc::json_string(event) << ",\"instance_id\":" << lhdc::json_string(utf8(instance_))
             << ",\"service\":" << lhdc::json_string(utf8(service)) << ",\"inf\":" << lhdc::json_string(utf8(inf))
             << ",\"problem\":" << code << "}\n";
     }
@@ -148,6 +149,8 @@ public:
         return candidates;
     }
     void print_candidate(SP_DRVINFO_DATA_W& driver) {
+        SP_DRVINSTALL_PARAMS install{sizeof(install)};
+        if (!SetupDiGetDriverInstallParamsW(set_,&data_,&driver,&install)) win_error("Driver ranking");
         DWORD size=0;
         SetupDiGetDriverInfoDetailW(set_,&data_,&driver,nullptr,0,&size);
         if (GetLastError()!=ERROR_INSUFFICIENT_BUFFER) win_error("Driver detail size");
@@ -158,7 +161,7 @@ public:
         std::cout << "{\"event\":\"candidate\",\"description\":" << lhdc::json_string(utf8(driver.Description))
             << ",\"provider\":" << lhdc::json_string(utf8(driver.ProviderName))
             << ",\"inf_path\":" << lhdc::json_string(utf8(detail->InfFileName))
-            << ",\"section\":" << lhdc::json_string(utf8(detail->SectionName)) << "}\n";
+            << ",\"section\":" << lhdc::json_string(utf8(detail->SectionName)) << ",\"rank\":" << install.Rank << "}\n";
     }
     bool install(SP_DRVINFO_DATA_W& driver,bool restore) {
         if (restore) {
@@ -172,9 +175,38 @@ public:
         return reboot!=FALSE;
     }
 private:
+    std::wstring instance_;
     HDEVINFO set_=INVALID_HANDLE_VALUE;
     SP_DEVINFO_DATA data_{};
 };
+void select_target(const wchar_t* instance) {
+    if (!administrator()) throw std::runtime_error("Selecting the service device requires an administrator process");
+    Target target(instance);
+    for (const auto& device:lhdc::discover_targets())
+        if (equal(device.service,L"lhdc-transport") && !equal(device.instance,instance))
+            throw std::runtime_error("Restore the other LHDC device to Windows audio before selecting a different device");
+    HKEY key=nullptr;
+    auto status=RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win\\Device",0,nullptr,0,KEY_SET_VALUE|KEY_QUERY_VALUE,nullptr,&key,nullptr);
+    if (status!=ERROR_SUCCESS) throw lhdc::WindowsError("Device selection key",status);
+    wchar_t previous[MAX_DEVICE_ID_LEN]{};DWORD previous_size=sizeof(previous);
+    const auto previous_status=RegGetValueW(key,nullptr,L"InstanceId",RRF_RT_REG_SZ,nullptr,previous,&previous_size);
+    if (previous_status!=ERROR_SUCCESS && previous_status!=ERROR_FILE_NOT_FOUND) { RegCloseKey(key);throw lhdc::WindowsError("Previous device selection",previous_status); }
+    if (previous_status==ERROR_FILE_NOT_FOUND || !equal(previous,instance)) {
+        const DWORD disabled=0;
+        status=RegSetValueExW(key,L"AbsoluteVolume",0,REG_DWORD,reinterpret_cast<const BYTE*>(&disabled),sizeof(disabled));
+        if (status!=ERROR_SUCCESS) { RegCloseKey(key);throw lhdc::WindowsError("New device volume mode",status); }
+        status=RegDeleteValueW(key,L"NativeAvrcpInstance");
+        if (status!=ERROR_SUCCESS && status!=ERROR_FILE_NOT_FOUND) { RegCloseKey(key);throw lhdc::WindowsError("New device controller reset",status); }
+    }
+    status=RegSetValueExW(key,L"InstanceId",0,REG_SZ,reinterpret_cast<const BYTE*>(instance),static_cast<DWORD>((wcslen(instance)+1)*sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (status!=ERROR_SUCCESS) throw lhdc::WindowsError("Device selection write",status);
+    for (const auto name:{L"PeerCapabilities",L"PeerDeviceInstance",L"PeerMediaMtu",L"PeerCapabilityRevision",L"ActiveBitrate"}) {
+        status=RegDeleteKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",name);
+        if (status!=ERROR_SUCCESS && status!=ERROR_FILE_NOT_FOUND) throw lhdc::WindowsError("Previous device cache reset",status);
+    }
+    target.snapshot("device_selected");
+}
 std::filesystem::path windows_inf() {
     std::vector<wchar_t> root(MAX_PATH);
     const auto size=GetWindowsDirectoryW(root.data(),static_cast<UINT>(root.size()));
@@ -222,9 +254,10 @@ int bind(const wchar_t* instance,const std::filesystem::path& supplied,const std
 }
 int wmain(int argc,wchar_t** argv) {
     try {
-        if (argc<2) throw std::invalid_argument("Usage: lhdc-device readiness | verify-package DIRECTORY CERTIFICATE | snapshot INSTANCE | candidates INSTANCE INF | install INSTANCE INF CERTIFICATE | restore INSTANCE");
+        if (argc<2) throw std::invalid_argument("Usage: lhdc-device readiness | select INSTANCE | verify-package DIRECTORY CERTIFICATE | snapshot INSTANCE | candidates INSTANCE INF | install INSTANCE INF CERTIFICATE | restore INSTANCE");
         const std::wstring command=argv[1];
         if (command==L"readiness" && argc==2) readiness();
+        else if (command==L"select" && argc==3) select_target(argv[2]);
         else if (command==L"verify-package" && argc==4) lhdc::verify_package_signature(argv[2],argv[3]);
         else if (command==L"snapshot" && argc==3) {Target target(argv[2]);target.snapshot("snapshot");}
         else if (command==L"candidates" && argc==4) {

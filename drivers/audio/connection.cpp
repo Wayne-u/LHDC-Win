@@ -5,6 +5,10 @@
 #include <initguid.h>
 #include <devpkey.h>
 #pragma code_seg("PAGE")
+NTSTATUS PropertyHandler_LhdcVolume(PPCPROPERTY_REQUEST request) {
+    PAGED_CODE();
+    return static_cast<CMiniportTopology*>(request->MajorTarget)->PropertyHandlerGeneric(request);
+}
 NTSTATUS LhdcLoadJackContainer(PDEVICE_OBJECT device,GUID* container) {
     PAGED_CODE();
     ULONG required=0;DEVPROPTYPE type=0;

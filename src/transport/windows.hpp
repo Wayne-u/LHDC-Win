@@ -12,11 +12,16 @@
 #include <stdexcept>
 #include <memory>
 #include <chrono>
+#include "target.hpp"
 namespace lhdc {
-struct TargetDevice { std::wstring instance; std::uint64_t address; };
+std::vector<TargetDevice> discover_targets();
+void override_target(std::wstring instance);
 std::optional<TargetDevice> discover_target();
 const TargetDevice& target_device();
+void inspect_targets();
 void inspect_target();
+bool absolute_volume_enabled();
+void claim_avrcp_controller();
 static_assert(sizeof(LHDC_INFO)==80 && sizeof(LHDC_SDU_HEADER)==16 && sizeof(LHDC_OPEN_INPUT)==24 && sizeof(LHDC_CHANNEL_INPUT)==16);
 class WindowsError : public std::runtime_error {
 public:
@@ -26,7 +31,6 @@ public:
 void inspect_windows();
 void inspect_connection(std::uint64_t address);
 bool bluetooth_connected(std::uint64_t address);
-void claim_avrcp_controller();
 struct SendTiming {
     std::int64_t submit_us=0,wait_us=0,completion_us=0,pending_age_us=0;
     bool pending=false;

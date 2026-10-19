@@ -49,6 +49,9 @@ void transfer(DirectPcm& pcm,HANDLE stop,Profile profile,const HfpActivity& hfp)
     const auto& caps=session.peer_capabilities();
     const auto saved=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilities",REG_BINARY,caps.data(),static_cast<DWORD>(caps.size()));
     if (saved!=ERROR_SUCCESS) throw std::runtime_error("Peer capability cache write failed, Win32="+std::to_string(saved));
+    const auto& instance=target_device().instance;
+    const auto saved_instance=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerDeviceInstance",REG_SZ,instance.c_str(),static_cast<DWORD>((instance.size()+1)*sizeof(wchar_t)));
+    if (saved_instance!=ERROR_SUCCESS) throw WindowsError("Peer device cache write",saved_instance);
     const auto saved_revision=RegSetKeyValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerCapabilityRevision",REG_DWORD,&revision,sizeof(revision));
     if(saved_revision!=ERROR_SUCCESS) throw WindowsError("Peer capability revision write",saved_revision);
     session.configure(profile);

@@ -3,8 +3,6 @@
 #include <bthdef.h>
 #include <bthioctl.h>
 #include <bthddi.h>
-#include <sdpnode.h>
-#include <bthsdpddi.h>
 #include <initguid.h>
 #include <bthguid.h>
 #include <lhdc_transport.h>
@@ -58,105 +56,6 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL RouteControl;
 EVT_WDF_IO_QUEUE_IO_STOP IoStop;
 EVT_WDF_REQUEST_COMPLETION_ROUTINE BrbComplete;
 EVT_WDF_WORKITEM DisconnectWorker;
-
-static NTSTATUS SendSdpIoctl(DEVICE_CONTEXT* ctx, ULONG code, PVOID input,
-    ULONG inputSize, PVOID output, ULONG outputSize)
-{
-    WDF_MEMORY_DESCRIPTOR inDescriptor, outDescriptor;
-    WDF_REQUEST_SEND_OPTIONS options;
-    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&inDescriptor, input, inputSize);
-    if (output != NULL) WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&outDescriptor, output, outputSize);
-    WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
-    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&options, WDF_REL_TIMEOUT_IN_SEC(3));
-    return WdfIoTargetSendIoctlSynchronously(ctx->Target, NULL, code,
-        &inDescriptor, output != NULL ? &outDescriptor : NULL, &options, NULL);
-}
-static BOOLEAN RecordHasProtocol(BTHDDI_SDP_PARSE_INTERFACE* parser, PUCHAR record, ULONG size, USHORT psm)
-{
-    PSDP_TREE_ROOT_NODE tree = NULL;
-    PSDP_NODE protocols = NULL;
-    PLIST_ENTRY head, link;
-    NTSTATUS status;
-    BOOLEAN l2cap = FALSE, protocol = FALSE;
-    status = parser->SdpConvertStreamToTree(record, size, &tree, 'cdhL');
-    if (!NT_SUCCESS(status)) return FALSE;
-    status = parser->SdpFindAttributeInTree(tree, 0x0004, &protocols);
-    if (!NT_SUCCESS(status) || protocols->hdr.Type != SDP_TYPE_SEQUENCE) goto done;
-    head = &protocols->u.sequence.Link;
-    for (link = head->Flink; link != head; link = link->Flink) {
-        PSDP_NODE sequence = CONTAINING_RECORD(link, SDP_NODE, hdr.Link);
-        PSDP_NODE uuid, parameter;
-        PLIST_ENTRY children;
-        if (sequence->hdr.Type != SDP_TYPE_SEQUENCE) goto done;
-        children = &sequence->u.sequence.Link;
-        if (IsListEmpty(children)) goto done;
-        uuid = CONTAINING_RECORD(children->Flink, SDP_NODE, hdr.Link);
-        if (uuid->hdr.SpecificType != SDP_ST_UUID16) continue;
-        if (uuid->u.uuid16 == psm) protocol = TRUE;
-        if (uuid->u.uuid16 != 0x0100) continue;
-        if (uuid->hdr.Link.Flink == children) goto done;
-        parameter = CONTAINING_RECORD(uuid->hdr.Link.Flink, SDP_NODE, hdr.Link);
-        if (parameter->hdr.SpecificType == SDP_ST_UINT16 && parameter->u.uint16 == psm) l2cap = TRUE;
-    }
-done:
-    parser->SdpFreeTree(tree);
-    return l2cap && protocol;
-}
-static NTSTATUS VerifySdpPsm(DEVICE_CONTEXT* ctx, USHORT psm)
-{
-    BTH_SDP_CONNECT connect = {0};
-    BTH_SDP_DISCONNECT disconnect = {0};
-    BTH_SDP_SERVICE_ATTRIBUTE_SEARCH_REQUEST search = {0};
-    BTH_SDP_STREAM_RESPONSE sizeResponse = {0};
-    PBTH_SDP_STREAM_RESPONSE response = NULL;
-    BTHDDI_SDP_PARSE_INTERFACE parser;
-    NTSTATUS status, disconnectStatus;
-    ULONG allocation, elementSize = 0;
-    PUCHAR element = NULL, previous = NULL;
-    BOOLEAN found = FALSE;
-    RtlZeroMemory(&parser, sizeof(parser));
-    connect.bthAddress = ctx->Channels[0].Info.RemoteAddress;
-    connect.requestTimeout = SDP_REQUEST_TO_MIN;
-    status = SendSdpIoctl(ctx, IOCTL_BTH_SDP_CONNECT, &connect, sizeof(connect), &connect, sizeof(connect));
-    if (!NT_SUCCESS(status)) return status;
-    search.hConnection = connect.hConnection;
-    search.uuids[0].uuidType = SDP_ST_UUID16;
-    search.uuids[0].u.uuid16 = psm == LHDC_AVCTP_PSM ? 0x110c : 0x110b;
-    search.range[0].minAttribute = 0x0004;
-    search.range[0].maxAttribute = 0x0004;
-    status = SendSdpIoctl(ctx, IOCTL_BTH_SDP_SERVICE_ATTRIBUTE_SEARCH,
-        &search, sizeof(search), &sizeResponse, sizeof(sizeResponse));
-    if (!NT_SUCCESS(status)) goto done;
-    if (sizeResponse.requiredSize == 0 || sizeResponse.requiredSize > 65535) { status = STATUS_DEVICE_DATA_ERROR; goto done; }
-    allocation = FIELD_OFFSET(BTH_SDP_STREAM_RESPONSE, response) + sizeResponse.requiredSize;
-    response = ExAllocatePool2(POOL_FLAG_NON_PAGED, allocation, 'cdhL');
-    if (response == NULL) { status = STATUS_INSUFFICIENT_RESOURCES; goto done; }
-    status = SendSdpIoctl(ctx, IOCTL_BTH_SDP_SERVICE_ATTRIBUTE_SEARCH,
-        &search, sizeof(search), response, allocation);
-    if (!NT_SUCCESS(status)) goto done;
-    if (response->responseSize != response->requiredSize || response->responseSize > sizeResponse.requiredSize) { status = STATUS_DEVICE_DATA_ERROR; goto done; }
-    status = WdfFdoQueryForInterface(ctx->Device, &GUID_BTHDDI_SDP_PARSE_INTERFACE,
-        (PINTERFACE)&parser, sizeof(parser), BTHDDI_SDP_PARSE_INTERFACE_VERSION_FOR_QI, NULL);
-    if (!NT_SUCCESS(status)) goto done;
-    do {
-        parser.SdpGetNextElement(response->response, response->responseSize, previous, &element, &elementSize);
-        if (elementSize == 0) break;
-        if (RecordHasProtocol(&parser, element, elementSize, psm)) { found = TRUE; break; }
-        previous = element;
-    } while (element != NULL);
-    status = found ? STATUS_SUCCESS : STATUS_DEVICE_PROTOCOL_ERROR;
-done:
-    if (parser.Interface.InterfaceDereference != NULL) parser.Interface.InterfaceDereference(parser.Interface.Context);
-    if (response != NULL) ExFreePoolWithTag(response, 'cdhL');
-    disconnect.hConnection = connect.hConnection;
-    disconnectStatus = SendSdpIoctl(ctx, IOCTL_BTH_SDP_DISCONNECT, &disconnect, sizeof(disconnect), NULL, 0);
-    if (!NT_SUCCESS(disconnectStatus)) {
-        TraceEvents(TRACE_LEVEL_ERROR, TRACE_TRANSPORT, "SDP disconnect failed=%!STATUS!", disconnectStatus);
-        if (NT_SUCCESS(status)) status = disconnectStatus;
-    }
-    TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_TRANSPORT, "SDP PSM=0x%04x validation=%!STATUS!", psm, status);
-    return status;
-}
 
 static NTSTATUS SendBrbSync(DEVICE_CONTEXT* ctx, PBRB brb, ULONG size)
 {
@@ -656,10 +555,7 @@ VOID IoControl(WDFQUEUE queue, WDFREQUEST request, size_t outLength, size_t inLe
             (slot->Info.ChannelId != LHDC_CHANNEL_MEDIA || ctx->Channels[LHDC_CHANNEL_SIGNAL - 1].Info.Connected);
         WdfSpinLockRelease(ctx->Lock);
         if (!available) { status = STATUS_DEVICE_BUSY; goto fail; }
-        if (slot->Info.ChannelId != LHDC_CHANNEL_MEDIA) {
-            status = VerifySdpPsm(ctx, slot->Info.ChannelId == LHDC_CHANNEL_AVRCP ? LHDC_AVCTP_PSM : LHDC_AVDTP_PSM);
-            if (!NT_SUCCESS(status)) goto fail;
-        } else TraceAclMode(slot);
+        if (slot->Info.ChannelId == LHDC_CHANNEL_MEDIA) TraceAclMode(slot);
         WdfSpinLockAcquire(ctx->Lock);
         available = ctx->Ready && !ctx->SessionClosing;
         if (available) {

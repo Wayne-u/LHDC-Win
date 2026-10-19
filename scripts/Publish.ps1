@@ -97,15 +97,16 @@ foreach ($pack in $runtimePacks) {
 Windows LHDC 使用说明
 
 1. 将整个压缩包解压到一个文件夹，双击 LHDC-ControlPanel.exe。
-2. 在 Windows 中配对 OPPO Enco X4，取出耳机并连接电脑。
-3. 在面板选择 LHDC 并应用，首次安装需要管理员授权；关闭面板不影响后台播放。
+2. 在 Windows 中配对支持 LHDC V5 的蓝牙耳机，并连接电脑。
+3. 在面板选择耳机，再选择 LHDC 并应用；安装时校验真实能力，不兼容则恢复 Windows 音频。首次安装需要管理员授权。
 4. 恢复 Windows 标准音频时，在面板选择 Windows 并应用。
 
 要求：Windows 11 22H2 或以后版本（构建号 22621+），Intel/AMD x64 电脑。
 本包已内置 .NET、PowerShell 和原生运行依赖，无需另行安装运行库。
 本包仍使用测试签名驱动，测试模式及现有驱动加载条件须事先满足；程序不自动修改启动配置、Secure Boot 或内存完整性设置。
 面板及部署日志保存在用户的 LocalAppData/LHDC-Win；服务和恢复状态保存在系统 ProgramData/LHDC-Win。
-请保留完整解压目录。此包尚未取得正式驱动签名，其他 Windows 构建和蓝牙适配器的兼容性仍需实测。
+安装时按耳机实际能力选择 AVRCP 统一音量或 Windows 软件音量，并按设备记忆音量和静音。软件音量模式下耳机自身增益独立。Hi-Res 控制只对已知兼容型号显示，不是播放前提。关闭面板不影响后台播放。
+请保留完整解压目录。通用播放模式尚待不同型号耳机实测；此包尚未取得正式驱动签名，其他 Windows 构建和蓝牙适配器的兼容性仍需实测。
 '@ | Set-Content -LiteralPath (Join-Path $output '使用说明.txt') -Encoding UTF8
 $projectXml=[xml](Get-Content -LiteralPath $uiProject -Raw -Encoding UTF8)
 $version=[string]$projectXml.Project.PropertyGroup.Version

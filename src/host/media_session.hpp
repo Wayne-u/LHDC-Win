@@ -8,11 +8,12 @@
 #include <deque>
 #include "audio/volume_sync.hpp"
 namespace lhdc {
+void inspect_playback_compatibility(Profile profile);
 struct SessionCompletion { std::uint64_t bytes; ULONG pending_signal,pending_media,pending_avrcp; };
 class MediaSession {
 public:
     bool supports_bitrate(Profile profile) const;
-    MediaSession(std::uint64_t remote,Profile profile);
+    MediaSession(std::uint64_t remote,Profile profile,bool control_volume=true);
     ~MediaSession();
     MediaSession(const MediaSession&)=delete;
     void discover();
@@ -20,6 +21,7 @@ public:
     bool configured_for(Profile profile) const;
     void configure(Profile profile);
     void open_media();
+    void close_prepared();
     const avdtp::Bytes& peer_capabilities() const { return peer_caps_; }
     void start(std::uint32_t block_samples);
     void check();

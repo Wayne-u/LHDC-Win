@@ -1,4 +1,6 @@
 #include "avrcp/protocol.hpp"
+#include "audio/volume_memory.hpp"
+#include <limits>
 #include "avdtp/protocol.hpp"
 #include <iostream>
 #include <stdexcept>
@@ -10,6 +12,15 @@ int main() {
     try {
         require(av::capabilities(1)==lhdc::avdtp::unhex("10110e0148000019581000000103"));
         require(av::notification(2)==lhdc::avdtp::unhex("20110e034800001958310000050d00000000"));
+        lhdc::VolumeMemory memory{1,0.31f,1,1};
+        require(lhdc::restore_volume_memory(memory,true,false));
+        require(!lhdc::restore_volume_memory(memory,false,false));
+        require(!lhdc::restore_volume_memory(memory,true,true));
+        memory.absolute=0;require(lhdc::restore_volume_memory(memory,false,false));
+        memory.muted=2;require(!lhdc::valid_volume_memory(memory));memory.muted=0;
+        memory.scalar=std::numeric_limits<float>::quiet_NaN();require(!lhdc::valid_volume_memory(memory));
+        memory.scalar=1.1f;require(!lhdc::valid_volume_memory(memory));
+        memory.scalar=0;memory.version=2;require(!lhdc::valid_volume_memory(memory));
         const auto caps=av::parse(lhdc::avdtp::unhex("12110e0c4800001958100000040302060d"));
         require(caps.label==1 && av::supports_volume(caps));
         const auto initial=av::parse(lhdc::avdtp::unhex("22110e0f4800001958310000020d22"));

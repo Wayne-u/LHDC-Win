@@ -5,6 +5,7 @@
 #include "audio/wav.hpp"
 #include "media/packetizer.hpp"
 #include "avdtp/stream.hpp"
+#include "transport/target.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>
@@ -22,6 +23,26 @@ template<class F> static void rejects(F function,const char* message) {
 }
 int main() {
     try {
+        const std::wstring sink=L"BTHENUM\\{0000110b-0000-1000-8000-00805f9b34fb}";
+        const auto vendor_instance=sink+L"_VID&00010001_PID&1234\\7&123&0&123456789abc_C00000000";
+        const auto radio_instance=sink+L"_LOCALMFG&000f\\8&456&0&AABBCCDDEEFF_C00000000";
+        require(lhdc::audio_sink_address(vendor_instance)==0x123456789abcull,"Audio Sink discovery accepts other vendor/product IDs");
+        require(lhdc::audio_sink_address(radio_instance)==0xaabbccddeeffull,"Audio Sink discovery accepts radio-specific IDs");
+        require(!lhdc::audio_sink_address(L"BTHENUM\\{0000110e-0000-1000-8000-00805f9b34fb}\\7&0&0&123456789ABC_C00000000"),"AVRCP is not an Audio Sink");
+        require(!lhdc::audio_sink_address(sink+L"\\7&0&0&123456789ABZ_C00000000"),"Malformed Bluetooth address is not a target");
+        require(!lhdc::audio_sink_address(sink+L"\\7&0&0&123456789ABC"),"A missing address boundary is rejected");
+        std::vector<lhdc::TargetDevice> targets{
+            {vendor_instance,0x123456789abc,L"Renamed headphones",L"",L"BthA2dp"},
+            {radio_instance,0xaabbccddeeff,L"Another brand",L"",L"BthA2dp"}};
+        require(!lhdc::target_index(targets,L""),"Multiple paired devices require a selection");
+        require(lhdc::target_index(targets,radio_instance)==1,"An explicit instance selects its own device");
+        require(!lhdc::target_index(targets,L"removed device"),"A missing saved device never redirects to another headphone");
+        targets[0].service=L"lhdc-transport";
+        require(lhdc::target_index(targets,L"")==0,"An existing LHDC binding remains the default");
+        targets[1].service=L"lhdc-transport";
+        require(!lhdc::target_index(targets,L""),"Multiple LHDC bindings are ambiguous");
+        targets.resize(1);
+        require(lhdc::target_index(targets,L"")==0,"A single paired Audio Sink can be selected automatically");
         lhdc::BitrateControl fixed({48000,24,1000},false);
         require(fixed.observe(1000,300,10000,500)==1000,"Fixed bitrate never drops automatically");
         lhdc::BitrateControl adaptive({48000,24,1000},true);
@@ -219,7 +240,7 @@ int main() {
         incompatible=caps; incompatible[14]=0x10;
         rejects([&]{av::select_configuration(incompatible,{});},"Peer missing version1");
         incompatible=caps; incompatible.insert(incompatible.end(),{4,2,2,0});
-        rejects([&]{av::select_configuration(incompatible,{});},"Unsupported protection");
+        require(av::select_configuration(incompatible,{})==caps,"Optional content protection is omitted rather than blocking unprotected playback");
         rejects([]{av::capabilities(av::Bytes{7,13,0});},"Truncated TLV");
         rejects([]{av::vendor_codec(av::Capability{7,{0,255}});},"Truncated vendor ID");
         rejects([]{av::unhex("012");},"Odd hex input");

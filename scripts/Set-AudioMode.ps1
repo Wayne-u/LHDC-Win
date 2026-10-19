@@ -5,6 +5,7 @@ param(
     [ValidateSet(16,24)][int]$Bits=24,
     [int]$Kbps=400,
     [switch]$AdaptiveBitrate,
+    [string]$DeviceInstance,
     [string]$ResultFile
 )
 $ErrorActionPreference='Stop'
@@ -18,12 +19,9 @@ $result=[ordered]@{Mode=$Mode;StartedAt=Get-Date -Format o;EvidenceDirectory=$ev
 $deviceTool=Join-Path $PackageRoot 'backend/lhdc-device.exe'
 $audioTool=Join-Path $PackageRoot 'backend/lhdc-audio-device.exe'
 $hostTool=Join-Path $PackageRoot 'backend/lhdc-host.exe'
-$deviceText=@(& $hostTool target)
-if($LASTEXITCODE -ne 0) { throw 'Target device discovery failed.' }
-$device=$deviceText[-1] | ConvertFrom-Json
-if(-not $device.found) { throw 'No supported Enco X4 is paired.' }
-$target=$device.instance
+$target=''
 function Invoke-Native([string]$Tool,[string[]]$Arguments,[string]$Name,[switch]$AllowRestart) {
+    if ($Tool -eq $hostTool -and $target) { $Arguments=@('--device',$target)+$Arguments }
     $output=@(& $Tool @Arguments 2>&1)
     $code=$LASTEXITCODE
     $output | Set-Content -LiteralPath (Join-Path $evidence ($Name+'.jsonl')) -Encoding UTF8
@@ -46,9 +44,9 @@ function Invoke-DriverChange([string[]]$Arguments,[string]$Name) {
         (Get-Service -Name $ServiceName).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(15))
     }
     try {
-        # audiodg can retain the old KS filters even after playback stops and
-        # veto device removal. Release its handles before replacing the stack.
-        Stop-AudioTree 'Audiosrv'
+        # Both Endpoint Builder and audiodg can retain the old KS filters and
+        # veto device removal. Release their handles before replacing the stack.
+        Stop-AudioTree 'AudioEndpointBuilder'
         return Invoke-Native $deviceTool $Arguments $Name -AllowRestart
     } finally {
         for($i=$stopped.Count-1;$i -ge 0;$i--) {
@@ -82,38 +80,55 @@ function Restore-InboxAudio([string]$Name) {
     $record=Invoke-DriverChange @('restore',$target) $Name
     $script:bound=$false
     $result.RebootRequired=[bool]$record.reboot_required
-    Set-AvrcpOwnership $false
+    Restore-NativeAvrcp
     if ($record.reboot_required) { throw 'Windows 驱动已绑定，但设备仍需重启才能完成切换。请手动重启电脑；尚未确认立体声恢复。' }
     return $record
 }
-function Set-AvrcpOwnership([bool]$Own) {
+function Restore-NativeAvrcp {
+    $null=Set-NativeAvrcpOwnership $false
+}
+function Save-NativeAvrcpIdentity([string]$Instance,[bool]$Own) {
+    $key=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\LHDC-Win\Device',$true)
+    try {
+        if ($Own) { $key.SetValue('NativeAvrcpInstance',$Instance,[Microsoft.Win32.RegistryValueKind]::String) }
+        else { $key.DeleteValue('NativeAvrcpInstance',$false) }
+    } finally { $key.Dispose() }
+}
+function Set-NativeAvrcpOwnership([bool]$Own) {
     $stateFile=Join-Path $env:ProgramData 'LHDC-Win/native-avrcp.json'
-    if (-not $Own -and -not (Test-Path -LiteralPath $stateFile)) { return }
+    if (-not $Own -and -not (Test-Path -LiteralPath $stateFile)) { return $false }
     $address=$device.address.Replace(':','')
     $controllers=@(Get-PnpDevice -PresentOnly | Where-Object {
         $_.InstanceId -match '^BTHENUM\\\{0000110E-0000-1000-8000-00805F9B34FB\}' -and
         $_.InstanceId -like ('*&'+$address+'_*')
     })
+    if ($Own -and $controllers.Count -eq 0) { return $true }
+    if ($Own -and $controllers.Count -gt 1 -and -not (Test-Path -LiteralPath $stateFile)) { return $false }
     if ($controllers.Count -ne 1) { throw 'Expected one native AVRCP controller for the target headphones.' }
     $instance=$controllers[0].InstanceId
     $service=(Get-PnpDeviceProperty -InstanceId $instance -KeyName DEVPKEY_Device_Service).Data
-    if ($service -ne 'Microsoft_Bluetooth_AvrcpTransport') { throw 'The target AVRCP controller has an unrelated driver.' }
+    if ($service -ne 'Microsoft_Bluetooth_AvrcpTransport') {
+        if ($Own -and -not (Test-Path -LiteralPath $stateFile)) { return $false }
+        throw 'The target AVRCP controller has an unrelated driver.'
+    }
     $problem=(Get-PnpDeviceProperty -InstanceId $instance -KeyName DEVPKEY_Device_ProblemCode).Data
     if ($problem -notin @(0,22)) { throw "The native AVRCP controller has a device problem: $problem." }
     if (Test-Path -LiteralPath $stateFile) {
         $state=Get-Content -LiteralPath $stateFile -Encoding UTF8 | ConvertFrom-Json
-        if ($state.Instance -ne $instance -or $state.WasEnabled -isnot [bool]) { throw 'Saved AVRCP ownership does not match the target headphones.' }
     } else {
         $state=[pscustomobject]@{Instance=$instance;WasEnabled=($problem -eq 0)}
         $state | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding UTF8
         Set-Acl -LiteralPath $stateFile -AclObject (Get-Acl -LiteralPath (Split-Path -Parent $stateFile))
     }
+    if ($state.Instance -ne $instance -or $state.WasEnabled -isnot [bool]) { throw 'Saved AVRCP ownership does not match the target headphones.' }
     if ($Own -and $problem -eq 0) { Disable-PnpDevice -InstanceId $instance -Confirm:$false }
     elseif (-not $Own -and $state.WasEnabled -and $problem -eq 22) { Enable-PnpDevice -InstanceId $instance -Confirm:$false }
     $after=(Get-PnpDeviceProperty -InstanceId $instance -KeyName DEVPKEY_Device_ProblemCode).Data
-    if (($Own -and $after -ne 22) -or (-not $Own -and $state.WasEnabled -and $after -ne 0)) { throw 'Native AVRCP ownership change did not verify.' }
+    if (($Own -and $after -ne 22) -or (-not $Own -and $state.WasEnabled -and $after -ne 0)) { throw 'Native AVRCP ownership did not verify.' }
+    Save-NativeAvrcpIdentity $instance $Own
     if (-not $Own) { Remove-Item -LiteralPath $stateFile }
     $result.NativeAvrcpOwnership=[ordered]@{Instance=$instance;LhdcOwnsController=$Own;OriginallyEnabled=$state.WasEnabled}
+    return $true
 }
 function Get-LhdcService {
     $service=Get-CimInstance -ClassName Win32_Service -Filter "Name='LHDC-Win'"
@@ -154,9 +169,12 @@ function Wait-LhdcPlaybackFormat {
     $stableSince=$null
     $stabilityWindow=[TimeSpan]::FromSeconds(2)
     $container=([guid](Get-PnpDeviceProperty -InstanceId $target -KeyName DEVPKEY_Device_ContainerId).Data).ToString('B')
+    $volumeKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\LHDC-Win\Device')
+    try { $expectedVolume=if ($volumeKey.GetValue('AbsoluteVolume',0) -eq 1) { 3 } else { 0 } }
+    finally { $volumeKey.Dispose() }
     do {
         $devices=Invoke-Native $hostTool @('audio-devices') 'format-endpoints'
-        $endpoint=@($devices.devices | Where-Object { $_.adapter_id -like '*lhdcwin#audio#*' -and $_.container_id -eq $container -and $_.channels -eq 2 -and $_.sample_rate -eq $SampleRate -and $_.device_sample_rate -eq $SampleRate -and $_.device_bits -eq $inputBits })
+        $endpoint=@($devices.devices | Where-Object { $_.adapter_id -like '*lhdcwin#audio#*' -and $_.container_id -eq $container -and $_.channels -eq 2 -and $_.sample_rate -eq $SampleRate -and $_.device_sample_rate -eq $SampleRate -and $_.device_bits -eq $inputBits -and ($_.volume_hardware_support -band 3) -eq $expectedVolume })
         if ($endpoint.Count -eq 1) {
             $ready=Invoke-Native $hostTool @('playback-ready',$endpoint[0].id,"$SampleRate","$Bits") 'format-readiness'
             if ($ready.ready) {
@@ -191,12 +209,42 @@ function Write-CodecProfile {
     # Set-Acl -LiteralPath does not resolve this registry path in PowerShell 7.6.
     Set-Acl -Path 'HKLM:\SOFTWARE\LHDC-Win' -AclObject $acl
 }
+function Initialize-VolumeMemory([bool]$Absolute,$Previous,$Probe) {
+    $key=[Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SOFTWARE\LHDC-Win\Volume\'+$device.address.Replace(':','').ToUpperInvariant())
+    try {
+        $saved=$key.GetValue('State')
+        if ($null -ne $saved) {
+            if ($saved -isnot [byte[]] -or $saved.Length -ne 16 -or [BitConverter]::ToUInt32($saved,0) -ne 1 -or
+                -not [float]::IsFinite([BitConverter]::ToSingle($saved,4)) -or [BitConverter]::ToSingle($saved,4) -lt 0 -or [BitConverter]::ToSingle($saved,4) -gt 1 -or
+                [BitConverter]::ToUInt32($saved,8) -gt 1 -or [BitConverter]::ToUInt32($saved,12) -gt 1) { throw 'Saved headphone volume is invalid.' }
+            if ([BitConverter]::ToUInt32($saved,12) -eq [uint32]$Absolute) { return }
+        }
+        if ($null -eq $Previous) { return }
+        [float]$scalar=$Previous.volume_scalar
+        if ($Absolute) { $scalar=[Math]::Min($scalar,[float]($Probe.remote_volume/127.0)) }
+        [byte[]]$state=@([BitConverter]::GetBytes([uint32]1)+[BitConverter]::GetBytes($scalar)+[BitConverter]::GetBytes([uint32][bool]$Previous.muted)+[BitConverter]::GetBytes([uint32]$Absolute))
+        $key.SetValue('State',$state,[Microsoft.Win32.RegistryValueKind]::Binary)
+        $result.VolumeMemoryInitialized=[ordered]@{Scalar=$scalar;Muted=[bool]$Previous.muted;Absolute=$Absolute}
+    } finally { $key.Dispose() }
+}
 $bound=$false
 $previousProfile=$null
 $previousAdaptive=$null
 try {
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Audio mode installation requires an administrator process.' }
+    $discoveryArguments=@('target')
+    if ($DeviceInstance) { $discoveryArguments=@('--device',$DeviceInstance)+$discoveryArguments }
+    $deviceText=@(& $hostTool @discoveryArguments)
+    if ($LASTEXITCODE -ne 0) { throw 'Target device discovery failed.' }
+    $device=$deviceText[-1] | ConvertFrom-Json
+    if (-not $device.found) { throw '请先配对并在面板选择一台蓝牙耳机。' }
+    $target=$device.instance
+    $result.Device=$device
+    $allTargets=Invoke-Native $hostTool @('targets') 'targets'
+    if (@($allTargets.devices | Where-Object { $_.service -eq 'lhdc-transport' -and $_.instance -ne $target }).Count) {
+        throw '请先把当前使用 LHDC 的耳机恢复为 Windows 音频，再切换到另一台耳机。'
+    }
     $result.Before=Invoke-Native $deviceTool @('snapshot',$target) 'before'
     if ($result.Before.service -notin @('BthA2dp','lhdc-transport')) { throw 'The target has an unrelated audio driver.' }
     if ($Mode -eq 'Windows') {
@@ -224,6 +272,7 @@ try {
             $result.WindowsStereoVerified=$true
         } else { $result.StereoVerificationPending=$true }
     } else {
+        if (-not $device.connected) { throw '首次安装或更新 LHDC 播放驱动前，请连接所选耳机，以便验证真实的 LHDC V5 能力。' }
         $os=Get-CimInstance -ClassName Win32_OperatingSystem
         $result.OperatingSystem=[ordered]@{BuildNumber=[int]$os.BuildNumber;Architecture=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()}
         if ($os.ProductType -ne 1 -or [int]$os.BuildNumber -lt 22621 -or $result.OperatingSystem.Architecture -ne 'X64') {
@@ -251,40 +300,25 @@ try {
         finally { if ($null -ne $profileKey) { $profileKey.Dispose() } }
         if ($null -ne $currentProfile -and ($currentProfile -isnot [byte[]] -or $currentProfile.Length -ne 12)) { throw 'Installed codec profile is invalid.' }
         $formatChanged=$null -eq $currentProfile -or $currentProfile.Length -ne 12 -or [BitConverter]::ToInt32($currentProfile,0) -ne $SampleRate -or [BitConverter]::ToInt32($currentProfile,4) -ne $Bits
-        $profileRetained=$result.Before.service -eq 'lhdc-transport' -and -not $formatChanged -and [BitConverter]::ToInt32($currentProfile,8) -eq $Kbps
-        # Updating binaries with the same profile must work while the earbuds
-        # are off. New high-rate selections still require live Hi-Res validation;
-        # the service always negotiates the real peer capabilities on reconnect.
-        if (($SampleRate -gt 48000 -or $Kbps -gt 400) -and -not $profileRetained) {
-            $hires=Invoke-Native $hostTool @('hires') 'hires-state'
-            if (-not $hires.supported -or $hires.enabled -ne $true) { throw 'Enable and verify earbud Hi-Res before selecting a high-rate LHDC profile.' }
-        }
         $hashes=[ordered]@{
             Transport=(Get-FileHash -LiteralPath (Join-Path $transportPackage 'lhdc-transport.sys') -Algorithm SHA256).Hash
             Audio=(Get-FileHash -LiteralPath (Join-Path $audioPackage 'lhdc-audio.sys') -Algorithm SHA256).Hash
             Service=(Get-FileHash -LiteralPath (Join-Path $PackageRoot 'backend/lhdc-service.exe') -Algorithm SHA256).Hash
         }
+        $volumeBefore=Invoke-Native $hostTool @('audio-devices') 'volume-before'
+        $previousVolume=@($volumeBefore.devices | Where-Object { $_.container_id -eq $device.container_id -and $_.channels -eq 2 -and
+            (($_.adapter_id -like '*lhdcwin#audio#*') -eq ($result.Before.service -eq 'lhdc-transport')) })
+        if ($previousVolume.Count -eq 1) { $previousVolume=$previousVolume[0] } else { $previousVolume=$null }
         if ($result.Before.service -eq 'lhdc-transport' -and $result.Before.problem -eq 0 -and $null -ne $installed -and (Test-Path -LiteralPath $deploymentFile)) {
             $deployment=Get-Content -LiteralPath $deploymentFile -Encoding UTF8 | ConvertFrom-Json
             $driversCurrent=$deployment.Transport -eq $hashes.Transport -and $deployment.Audio -eq $hashes.Audio
-            if ($driversCurrent -and $deployment.Service -eq $hashes.Service -and $installed.State -eq 'Running') {
-                if ($installed.PathName -ne ('"'+$servicePath+'"') -or (Get-FileHash -LiteralPath $servicePath -Algorithm SHA256).Hash -ne $hashes.Service) { throw 'Installed service binary differs.' }
-                Set-AvrcpOwnership $true
-                if ($formatChanged) { $bound=$true; Stop-LhdcService }
-                Write-CodecProfile
-                if ($formatChanged) {
-                    Restart-LhdcAudioChild
-                    Wait-LhdcPlaybackFormat
-                    Start-Service -Name 'LHDC-Win'
-                    (Get-Service -Name 'LHDC-Win').WaitForStatus('Running',[TimeSpan]::FromSeconds(10))
-                }
-                $result.ProfileApplied=$true
-                $result.Completed=$true
-                return
-            }
         }
         $bound=$result.Before.service -eq 'lhdc-transport'
         Stop-LhdcService
+        $result.Selection=Invoke-Native $deviceTool @('select',$target) 'select-device'
+        $volumeKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\LHDC-Win\Device')
+        try { $previousVolumeMode=[int]$volumeKey.GetValue('AbsoluteVolume',0) }
+        finally { $volumeKey.Dispose() }
         Write-CodecProfile
         if ($bound -and -not $driversCurrent) {
             # The device installer deliberately accepts only the supported
@@ -301,8 +335,56 @@ try {
             if ($result.Binding.reboot_required) { throw 'Windows 尚未卸载旧音频驱动，LHDC 驱动等待系统重启，切换尚未完成。' }
         } else {
             $result.DriversRetained=$true
-            if ($formatChanged) { Restart-LhdcAudioChild }
         }
+        # Release any old controller before probing the selected peer anew.
+        Restore-NativeAvrcp
+        $result.Compatibility=Invoke-Native $hostTool @('probe',"$SampleRate","$Bits","$Kbps") 'playback-compatibility'
+        $installDirectory=Join-Path $env:ProgramFiles 'LHDC-Win'
+        $dataDirectory=Join-Path $env:ProgramData 'LHDC-Win'
+        foreach ($directory in @($installDirectory,$dataDirectory)) {
+            if (Test-Path -LiteralPath $directory) {
+                $item=Get-Item -LiteralPath $directory
+                $owner=(Get-Acl -LiteralPath $directory).GetOwner([Security.Principal.SecurityIdentifier]).Value
+                if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $owner -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Service deployment directory is not owned by SYSTEM or Administrators, or is a reparse point.' }
+            } else { New-Item -ItemType Directory -Path $directory | Out-Null }
+        }
+        # The LocalSystem service runs only from an administrator-writable path.
+        $acl=[Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        $acl.SetAccessRuleProtection($true,$false)
+        foreach ($entry in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@('S-1-5-32-545','ReadAndExecute'))) {
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($entry[0]),$entry[1],'ContainerInherit,ObjectInherit','None','Allow'))
+        }
+        Set-Acl -LiteralPath $installDirectory -AclObject $acl
+        Set-Acl -LiteralPath $dataDirectory -AclObject $acl
+        foreach ($file in @($servicePath,(Join-Path $dataDirectory 'service.jsonl'))) {
+            if (Test-Path -LiteralPath $file) {
+                if ((Get-Item -LiteralPath $file).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'A service deployment file is a reparse point.' }
+                Set-Acl -LiteralPath $file -AclObject $acl
+            }
+        }
+        $absolute=$false
+        # Probe remote volume support without changing the earbud's gain.
+        # Only supported peers use AVRCP; others retain software PCM volume.
+        if (Set-NativeAvrcpOwnership $true) {
+            $result.VolumeProbe=Invoke-Native $hostTool @('volume-probe') 'volume-probe'
+            $absolute=[bool]$result.VolumeProbe.supported
+        }
+        if (-not $absolute) { Restore-NativeAvrcp }
+        Initialize-VolumeMemory $absolute $previousVolume $(if ($absolute) { $result.VolumeProbe } else { $null })
+        $volumeKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\LHDC-Win\Device',$true)
+        try { $volumeKey.SetValue('AbsoluteVolume',[int]$absolute,[Microsoft.Win32.RegistryValueKind]::DWord) }
+        finally { $volumeKey.Dispose() }
+        $result.AbsoluteVolume=$absolute
+        if ($formatChanged -or $previousVolumeMode -ne [int]$absolute) { Restart-LhdcAudioChild }
+        $registry=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\LHDC-Win',$true)
+        try {
+            $registry.SetValue('PeerCapabilities',[Convert]::FromHexString($result.Compatibility.peer_capabilities),[Microsoft.Win32.RegistryValueKind]::Binary)
+            $registry.SetValue('PeerDeviceInstance',$target,[Microsoft.Win32.RegistryValueKind]::String)
+            $registry.SetValue('PeerMediaMtu',[int]$result.Compatibility.media_mtu,[Microsoft.Win32.RegistryValueKind]::DWord)
+            $revision=$registry.GetValue('CapabilityRevision',0)
+            $registry.SetValue('PeerCapabilityRevision',[int]$revision,[Microsoft.Win32.RegistryValueKind]::DWord)
+        } finally { $registry.Dispose() }
         # A disconnected earbud has no audio child. Ask the transport to
         # enumerate it before checking PCM, and defer those checks when off.
         $audioConnection=Invoke-Native $hostTool @('audio-connection') 'audio-presence'
@@ -337,30 +419,6 @@ try {
             if (-not $result.DirectPcm.present) { throw 'Direct PCM interface disappeared after binding the audio driver.' }
             $result.ModeFormats=Invoke-Native $hostTool @('direct-formats') 'mode-formats'
         } else { $result.FormatVerificationPending=$true }
-        $installDirectory=Join-Path $env:ProgramFiles 'LHDC-Win'
-        $dataDirectory=Join-Path $env:ProgramData 'LHDC-Win'
-        foreach ($directory in @($installDirectory,$dataDirectory)) {
-            if (Test-Path -LiteralPath $directory) {
-                $item=Get-Item -LiteralPath $directory
-                $owner=(Get-Acl -LiteralPath $directory).GetOwner([Security.Principal.SecurityIdentifier]).Value
-                if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $owner -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Service deployment directory is not owned by SYSTEM or Administrators, or is a reparse point.' }
-            } else { New-Item -ItemType Directory -Path $directory | Out-Null }
-        }
-        # The LocalSystem service runs only from an administrator-writable path.
-        $acl=[Security.AccessControl.DirectorySecurity]::new()
-        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-        $acl.SetAccessRuleProtection($true,$false)
-        foreach ($entry in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@('S-1-5-32-545','ReadAndExecute'))) {
-            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($entry[0]),$entry[1],'ContainerInherit,ObjectInherit','None','Allow'))
-        }
-        Set-Acl -LiteralPath $installDirectory -AclObject $acl
-        Set-Acl -LiteralPath $dataDirectory -AclObject $acl
-        foreach ($file in @($servicePath,(Join-Path $dataDirectory 'service.jsonl'))) {
-            if (Test-Path -LiteralPath $file) {
-                if ((Get-Item -LiteralPath $file).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'A service deployment file is a reparse point.' }
-                Set-Acl -LiteralPath $file -AclObject $acl
-            }
-        }
         Copy-Item -LiteralPath (Join-Path $PackageRoot 'backend/lhdc-service.exe') -Destination $servicePath -Force
         $service=Get-LhdcService
         if ($null -eq $service) {
@@ -369,7 +427,6 @@ try {
             if ($service.PathName -ne ('"'+$servicePath+'"') -or $service.StartName -ne 'LocalSystem') { throw 'Existing LHDC service configuration differs.' }
             Set-Service -Name 'LHDC-Win' -StartupType Automatic
         }
-        Set-AvrcpOwnership $true
         & sc.exe failure LHDC-Win reset= 86400 actions= restart/1000/restart/5000/restart/30000 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'SCM recovery configuration failed.' }
         Wait-LhdcPlaybackFormat

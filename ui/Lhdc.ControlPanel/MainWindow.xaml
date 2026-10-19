@@ -18,7 +18,7 @@
                     <Button x:Name="SettingsNav" Content="音频设置" Click="ShowSettings" Style="{StaticResource SelectedNavigation}" Margin="0,0,0,8"/>
                     <Button x:Name="DiagnosticsNav" Content="诊断日志" Click="ShowDiagnostics" Style="{StaticResource Navigation}"/>
                 </StackPanel>
-                <TextBlock Grid.Row="3" Text="v0.8" Style="{StaticResource Hint}" Margin="12,0,0,0"/>
+                <TextBlock Grid.Row="3" Text="v0.8.7" Style="{StaticResource Hint}" Margin="12,0,0,0"/>
             </Grid>
         </Border>
         <Grid Grid.Column="1" Margin="28,26,28,22">
@@ -34,7 +34,7 @@
                         <TextBlock Text="&#xE7F6;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource Accent}" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </Border>
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="OPPO Enco X4" FontSize="18" FontWeight="SemiBold"/>
+                        <ComboBox x:Name="DeviceBox" DisplayMemberPath="Label" SelectionChanged="DeviceChanged" AutomationProperties.Name="蓝牙耳机" Margin="0,0,12,0"/>
                         <TextBlock x:Name="DriverText" Style="{StaticResource Hint}" Margin="0,5,0,0"/>
                     </StackPanel>
                     <Border x:Name="ConnectionFrame" Grid.Column="2" Background="#F1F5F9" CornerRadius="12" Padding="11,5" VerticalAlignment="Center">
@@ -57,7 +57,7 @@
                                 </StackPanel>
                             </Grid>
                             <Border Height="1" Background="{StaticResource Line}" Margin="0,24"/>
-                            <Grid Margin="0,0,0,24">
+                            <Grid x:Name="HiResRow" Margin="0,0,0,24" Visibility="Collapsed">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="132"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <TextBlock Text="Hi-Res 音频" VerticalAlignment="Center"/>
                                 <StackPanel Grid.Column="1">

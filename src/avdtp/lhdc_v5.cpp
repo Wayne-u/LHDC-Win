@@ -22,7 +22,8 @@ V5Capabilities v5_capabilities(std::span<const std::uint8_t> raw) {
     bool transport=false,codec=false;
     V5Capabilities result{};
     for (const auto& cap : caps) {
-        if (cap.category==4) throw std::runtime_error("Content Protection is not supported by this probe");
+        // Optional peer capabilities are omitted from our configuration. A
+        // peer requiring content protection can reject SetConfiguration.
         if (cap.category==1) {
             if (transport || !cap.data.empty()) throw std::runtime_error("Invalid Media Transport capability");
             transport=true;

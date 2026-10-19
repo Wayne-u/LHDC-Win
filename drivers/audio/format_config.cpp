@@ -3,9 +3,31 @@
 #include "format_config.h"
 namespace {
 ULONG config_id=0;
+bool hardware_volume=false;
 KSDATAFORMAT_WAVEFORMATEXTENSIBLE* playback_format=nullptr;
 }
+bool LhdcHardwareVolume() { return hardware_volume; }
 #pragma code_seg("PAGE")
+static NTSTATUS LoadVolumeMode() {
+    PAGED_CODE();
+    hardware_volume=false;
+    UNICODE_STRING path,name;OBJECT_ATTRIBUTES attributes;HANDLE key;
+    RtlInitUnicodeString(&path,L"\\Registry\\Machine\\SOFTWARE\\LHDC-Win\\Device");
+    InitializeObjectAttributes(&attributes,&path,OBJ_KERNEL_HANDLE|OBJ_CASE_INSENSITIVE,nullptr,nullptr);
+    auto status=ZwOpenKey(&key,KEY_QUERY_VALUE,&attributes);
+    if (status==STATUS_OBJECT_NAME_NOT_FOUND || status==STATUS_OBJECT_PATH_NOT_FOUND) return STATUS_SUCCESS;
+    if (!NT_SUCCESS(status)) return status;
+    RtlInitUnicodeString(&name,L"AbsoluteVolume");
+    alignas(KEY_VALUE_PARTIAL_INFORMATION) BYTE bytes[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION,Data)+sizeof(ULONG)]{};
+    ULONG size=0;status=ZwQueryValueKey(key,&name,KeyValuePartialInformation,bytes,sizeof(bytes),&size);ZwClose(key);
+    if (status==STATUS_OBJECT_NAME_NOT_FOUND) return STATUS_SUCCESS;
+    if (!NT_SUCCESS(status)) return status;
+    const auto* value=reinterpret_cast<KEY_VALUE_PARTIAL_INFORMATION*>(bytes);
+    if (value->Type!=REG_DWORD || value->DataLength!=sizeof(ULONG)) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    ULONG enabled=0;RtlCopyMemory(&enabled,value->Data,sizeof(enabled));
+    if (enabled>1) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    hardware_volume=enabled!=0;return STATUS_SUCCESS;
+}
 NTSTATUS LhdcLoadPlaybackFormat(KSDATAFORMAT_WAVEFORMATEXTENSIBLE* format,KSDATARANGE_AUDIO* range) {
     PAGED_CODE();
     UNICODE_STRING path,name;
@@ -39,8 +61,9 @@ NTSTATUS LhdcLoadPlaybackFormat(KSDATAFORMAT_WAVEFORMATEXTENSIBLE* format,KSDATA
     format->DataFormat.SampleSize=wave.Format.nBlockAlign;
     range->MinimumSampleFrequency=range->MaximumSampleFrequency=rate;
     range->MinimumBitsPerSample=range->MaximumBitsPerSample=inputBits;
-    // Stable configuration identity: sample rate in upper bits, depth in low byte.
-    config_id=0x02000000|(rate<<8)|bits;
+    status=LoadVolumeMode();if (!NT_SUCCESS(status)) return status;
+    // Include the gain topology so Windows refreshes hardware-volume support.
+    config_id=0x10000000|(hardware_volume?0x08000000:0)|(rate<<8)|bits;
     playback_format=format;
     return STATUS_SUCCESS;
 }

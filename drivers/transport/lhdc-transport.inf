@@ -3,7 +3,7 @@ Signature="$WINDOWS NT$"
 Class=Bluetooth
 ClassGuid={e0cbf06c-cd8b-4647-bb8a-263b43f0f974}
 Provider=%Provider%
-DriverVer=10/14/2026,0.6.1.0
+DriverVer=10/19/2026,0.8.7.0
 CatalogFile=lhdc-transport.cat
 PnpLockdown=1
 
@@ -11,9 +11,10 @@ PnpLockdown=1
 %Provider%=Models,NTamd64.10.0...22621
 
 [Models.NTamd64.10.0...22621]
-; Deliberately matches only the observed OPPO Audio Sink hardware ID.
-; Binding must still be selected and checked for the exact device instance.
-%DeviceDesc%=Transport,BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}_VID&000102b0_PID&0000
+; BthEnum never emits the private hardware ID; real devices match only the
+; standard Audio Sink compatible ID, ranked below inbox hardware-ID matches.
+; The installer binds one explicitly selected instance and probes LHDC V5.
+%DeviceDesc%=Transport,LHDCWIN\SelectedAudioSink,BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}
 
 [DestinationDirs]
 DriverFiles=13
@@ -54,5 +55,5 @@ KmdfLibraryVersion=1.33
 
 [Strings]
 Provider="Windows LHDC Prototype"
-DeviceDesc="Enco X4 LHDC A2DP Driver"
+DeviceDesc="LHDC V5 Bluetooth Audio Transport"
 DiskName="Windows LHDC transport"

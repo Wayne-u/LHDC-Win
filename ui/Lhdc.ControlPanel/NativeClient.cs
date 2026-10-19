@@ -10,6 +10,7 @@ public sealed class AudioModeRestartRequiredException:IOException {
     public AudioModeRestartRequiredException():base("Windows 尚未完成音频驱动切换，需要手动重启电脑后重试。") {}
 }
 public sealed class NativeClient {
+    public string DeviceInstance { get; set; } = "";
     public static AudioProfile? InstalledProfile() {
         using var key=Registry.LocalMachine.OpenSubKey(@"SOFTWARE\LHDC-Win");
         if(key?.GetValue("Profile") is not byte[] value) return null;
@@ -44,6 +45,9 @@ public sealed class NativeClient {
             UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,
             StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8
         };
+        if(DeviceInstance.Length>0 && arguments[0]!="targets") {
+            start.ArgumentList.Add("--device");start.ArgumentList.Add(DeviceInstance);
+        }
         foreach(var argument in arguments) start.ArgumentList.Add(argument);
         using var process=Process.Start(start) ?? throw new IOException("无法启动原生后端");
         var stdout=process.StandardOutput.ReadToEndAsync();
@@ -57,7 +61,8 @@ public sealed class NativeClient {
     public Task<JsonObject> SetAudioMode(string mode,AudioProfile profile,string resultFile) {
         var script=Path.Combine(applicationRoot,"scripts","Set-AudioMode.ps1");
         var adaptive=profile.AdaptiveBitrate?" -AdaptiveBitrate":"";
-        var command=$"& {Quote(script)} -PackageRoot {Quote(applicationRoot)} -Mode {Quote(mode)} -SampleRate {profile.SampleRate} -Bits {profile.Bits} -Kbps {profile.Kbps}{adaptive} -ResultFile {Quote(resultFile)}";
+        if(DeviceInstance.Length==0) throw new InvalidOperationException("请先选择一台已配对的蓝牙耳机");
+        var command=$"& {Quote(script)} -PackageRoot {Quote(applicationRoot)} -DeviceInstance {Quote(DeviceInstance)} -Mode {Quote(mode)} -SampleRate {profile.SampleRate} -Bits {profile.Bits} -Kbps {profile.Kbps}{adaptive} -ResultFile {Quote(resultFile)}";
         return RunElevated(command,resultFile);
     }
     public bool ServiceBinaryCurrent() {

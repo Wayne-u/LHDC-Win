@@ -5,6 +5,7 @@
 #include <cfgmgr32.h>
 #include <devpkey.h>
 #include <bluetoothapis.h>
+#include <objbase.h>
 #include <stdexcept>
 #include <iostream>
 #include <memory>
@@ -112,75 +113,116 @@ void inspect_windows() {
     out << "],\"peer_capabilities_observed\":false}\n";
     std::cout << out.str();
 }
-std::optional<TargetDevice> discover_target() {
+static std::wstring target_override;
+bool absolute_volume_enabled() {
+    DWORD enabled=0,size=sizeof(enabled);
+    const auto status=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win\\Device",L"AbsoluteVolume",RRF_RT_REG_DWORD,nullptr,&enabled,&size);
+    if (status==ERROR_FILE_NOT_FOUND) return false;
+    if (status!=ERROR_SUCCESS) throw WindowsError("Volume mode read",status);
+    if (enabled>1) throw std::runtime_error("Invalid volume mode");
+    return enabled!=0;
+}
+void claim_avrcp_controller() {
+    if (!absolute_volume_enabled()) return;
+    wchar_t instance[MAX_DEVICE_ID_LEN]{};DWORD size=sizeof(instance);
+    const auto error=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win\\Device",L"NativeAvrcpInstance",RRF_RT_REG_SZ,nullptr,instance,&size);
+    if (error==ERROR_FILE_NOT_FOUND) return;
+    if (error!=ERROR_SUCCESS) throw WindowsError("Native AVRCP identity read",error);
+    DEVINST device=0;auto status=CM_Locate_DevNodeW(&device,instance,CM_LOCATE_DEVNODE_NORMAL);
+    if (status==CR_NO_SUCH_DEVNODE) return;
+    if (status!=CR_SUCCESS) throw std::runtime_error("Native AVRCP lookup failed, CR="+std::to_string(status));
+    ULONG flags=0,problem=0;status=CM_Get_DevNode_Status(&flags,&problem,device,0);
+    if (status!=CR_SUCCESS) throw std::runtime_error("Native AVRCP status failed, CR="+std::to_string(status));
+    if (problem==CM_PROB_DISABLED) return;
+    if (problem) throw std::runtime_error("Native AVRCP controller has a device problem="+std::to_string(problem));
+    status=CM_Disable_DevNode(device,CM_DISABLE_UI_NOT_OK|CM_DISABLE_PERSIST);
+    if (status!=CR_SUCCESS) throw std::runtime_error("Native AVRCP controller claim failed, CR="+std::to_string(status));
+}
+void override_target(std::wstring instance) { target_override=std::move(instance); }
+static std::wstring selected_instance() {
+    if (!target_override.empty()) return target_override;
+    DWORD size=0;
+    auto status=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win\\Device",L"InstanceId",RRF_RT_REG_SZ,nullptr,nullptr,&size);
+    if (status==ERROR_FILE_NOT_FOUND) return {};
+    if (status!=ERROR_SUCCESS) throw WindowsError("Selected device size",status);
+    std::wstring instance(size/sizeof(wchar_t),L'\0');
+    status=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win\\Device",L"InstanceId",RRF_RT_REG_SZ,nullptr,instance.data(),&size);
+    if (status!=ERROR_SUCCESS) throw WindowsError("Selected device read",status);
+    instance.resize(wcslen(instance.c_str()));
+    return instance;
+}
+std::vector<TargetDevice> discover_targets() {
     DeviceSet set{SetupDiGetClassDevsW(nullptr,L"BTHENUM",nullptr,DIGCF_ALLCLASSES|DIGCF_PRESENT)};
     if(set.value==INVALID_HANDLE_VALUE) win_error("Target device enumeration");
-    std::optional<TargetDevice> found;
+    std::vector<TargetDevice> found;
     for(DWORD index=0;;++index) {
         SP_DEVINFO_DATA device{sizeof(device)};
         if(!SetupDiEnumDeviceInfo(set.value,index,&device)) {
             if(GetLastError()==ERROR_NO_MORE_ITEMS) break;
             win_error("Target device enumeration");
         }
-        const auto hardware=property(set.value,device,DEVPKEY_Device_HardwareIds);
-        if(_wcsicmp(hardware.c_str(),L"BTHENUM\\{0000110B-0000-1000-8000-00805F9B34FB}_VID&000102B0_PID&0000")!=0) continue;
         wchar_t id[MAX_DEVICE_ID_LEN]{};
         if(!SetupDiGetDeviceInstanceIdW(set.value,&device,id,MAX_DEVICE_ID_LEN,nullptr)) win_error("Target instance ID");
         std::wstring instance(id);
-        const auto suffix=instance.rfind(L'_');
-        if(suffix==std::wstring::npos || suffix<13 || instance[suffix-13]!=L'&') continue;
-        const auto hexadecimal=instance.substr(suffix-12,12);
-        if(!std::all_of(hexadecimal.begin(),hexadecimal.end(),[](wchar_t c){return std::iswxdigit(c)!=0;})) continue;
-        const auto address=std::stoull(hexadecimal,nullptr,16);
-        const auto connection=query_connection(address);
-        if(!connection.known || _wcsicmp(connection.device.szName,L"OPPO Enco X4")!=0) continue;
-        if(found) throw std::runtime_error("Multiple Enco X4 Audio Sink devices are paired; select one by removing the other pairing first");
-        found=TargetDevice{std::move(instance),address};
+        const auto address=audio_sink_address(instance);
+        if (!address) continue;
+        const auto connection=query_connection(*address);
+        if (!connection.known || (!connection.device.fRemembered && !connection.device.fAuthenticated)) continue;
+        GUID container{};DEVPROPTYPE type=0;DWORD size=sizeof(container);
+        if (!SetupDiGetDevicePropertyW(set.value,&device,&DEVPKEY_Device_ContainerId,&type,reinterpret_cast<PBYTE>(&container),size,&size,0)) win_error("Target container");
+        if (type!=DEVPROP_TYPE_GUID || size!=sizeof(container)) throw std::runtime_error("Invalid Bluetooth container ID");
+        wchar_t container_text[40]{};
+        if (!StringFromGUID2(container,container_text,40)) throw std::runtime_error("Bluetooth container conversion failed");
+        const auto hardware=property(set.value,device,DEVPKEY_Device_HardwareIds);
+        const bool melody=same_instance(hardware,L"BTHENUM\\{0000110B-0000-1000-8000-00805F9B34FB}_VID&000102B0_PID&0000") &&
+            same_instance(connection.device.szName,L"OPPO Enco X4");
+        found.push_back({std::move(instance),*address,connection.device.szName,container_text,
+            property(set.value,device,DEVPKEY_Device_Service),connection.device.fConnected!=FALSE,melody});
     }
     return found;
+}
+std::optional<TargetDevice> discover_target() {
+    const auto devices=discover_targets();
+    const auto index=target_index(devices,selected_instance());
+    return index?std::optional{devices[*index]}:std::nullopt;
 }
 const TargetDevice& target_device() {
     static const auto target=[] {
         const auto device=discover_target();
-        if(!device) throw std::runtime_error("No supported OPPO Enco X4 Audio Sink is paired");
+        if(!device) throw std::runtime_error("Select a paired Bluetooth Audio Sink in the panel or use --device INSTANCE");
         return *device;
     }();
     return target;
 }
+static void print_target(const TargetDevice& target) {
+    std::ostringstream address;
+    address<<std::hex<<std::uppercase<<std::setfill('0');
+    for (int byte=5;byte>=0;--byte) {
+        if (byte!=5) address<<':';
+        address<<std::setw(2)<<((target.address>>(byte*8))&255);
+    }
+    std::cout<<"\"instance\":"<<json_string(utf8(target.instance))<<",\"address\":"<<json_string(address.str())
+        <<",\"name\":"<<json_string(utf8(target.name))<<",\"container_id\":"<<json_string(utf8(target.container))
+        <<",\"service\":"<<json_string(utf8(target.service))<<",\"connected\":"<<(target.connected?"true":"false")
+        <<",\"hey_melody\":"<<(target.hey_melody?"true":"false");
+}
+void inspect_targets() {
+    const auto devices=discover_targets();
+    const auto index=target_index(devices,selected_instance());
+    std::cout<<"{\"event\":\"target_devices\",\"selected_instance\":"<<json_string(index?utf8(devices[*index].instance):"")<<",\"devices\":[";
+    for (std::size_t i=0;i<devices.size();++i) {
+        if (i) std::cout<<',';
+        std::cout<<'{';print_target(devices[i]);std::cout<<'}';
+    }
+    std::cout<<"]}\n";
+}
 void inspect_target() {
     const auto target=discover_target();
     std::cout<<"{\"event\":\"target_device\",\"found\":"<<(target?"true":"false");
-    if(target) {
-        std::ostringstream address;
-        address<<std::hex<<std::uppercase<<std::setfill('0');
-        for(int byte=5;byte>=0;--byte) {
-            if(byte!=5) address<<':';
-            address<<std::setw(2)<<((target->address>>(byte*8))&255);
-        }
-        std::cout<<",\"instance\":"<<json_string(utf8(target->instance))<<",\"address\":"<<json_string(address.str());
-    }
+    if(target) { std::cout<<',';print_target(*target); }
     std::cout<<"}\n";
 }
 bool bluetooth_connected(std::uint64_t address) { return query_connection(address).device.fConnected!=FALSE; }
-void claim_avrcp_controller() {
-    auto instance=target_device().instance;
-    CharUpperBuffW(instance.data(),static_cast<DWORD>(instance.size()));
-    constexpr wchar_t sink[]=L"{0000110B-0000-1000-8000-00805F9B34FB}";
-    const auto position=instance.find(sink);
-    if (position==std::wstring::npos) throw std::runtime_error("AVRCP controller identity is invalid");
-    instance.replace(position,std::size(sink)-1,L"{0000110E-0000-1000-8000-00805F9B34FB}");
-    DEVINST device=0;
-    auto result=CM_Locate_DevNodeW(&device,instance.data(),CM_LOCATE_DEVNODE_NORMAL);
-    if (result!=CR_SUCCESS) throw std::runtime_error("Native AVRCP controller lookup failed, CR="+std::to_string(result));
-    ULONG status=0,problem=0;
-    result=CM_Get_DevNode_Status(&status,&problem,device,0);
-    if (result!=CR_SUCCESS) throw std::runtime_error("Native AVRCP controller status failed, CR="+std::to_string(result));
-    if (problem==CM_PROB_DISABLED) return;
-    if (problem) throw std::runtime_error("Native AVRCP controller has a device problem="+std::to_string(problem));
-    result=CM_Disable_DevNode(device,CM_DISABLE_UI_NOT_OK|CM_DISABLE_PERSIST);
-    if (result!=CR_SUCCESS) throw std::runtime_error("Native AVRCP controller claim failed, CR="+std::to_string(result));
-    std::cout<<"{\"event\":\"native_avrcp_controller_claimed\"}"<<std::endl;
-}
 void inspect_connection(std::uint64_t address) {
     const auto connection=query_connection(address); const auto& info=connection.device;
     std::cout << "{\"event\":\"bluetooth_connection\",\"radio_present\":" << (connection.radio?"true":"false") << ",\"known\":" << (connection.known?"true":"false")
@@ -189,9 +231,16 @@ void inspect_connection(std::uint64_t address) {
         << ",\"audio_stream_verified\":false}\n";
 }
 Transport::Transport(std::uint64_t address):address_(address) {
-    const auto paths=interfaces();
-    if (paths.empty()) throw std::runtime_error("LHDC transport driver is not bound/loaded; run inspect for the current Audio Sink service");
-    if (paths.size()!=1) throw std::runtime_error("Expected exactly one LHDC transport interface");
+    auto paths=interfaces();
+    const auto& selected=target_device().instance;
+    std::erase_if(paths,[&](const auto& path) {
+        wchar_t instance[MAX_DEVICE_ID_LEN]{};
+        const auto status=CM_Get_Device_IDW(path.device,instance,MAX_DEVICE_ID_LEN,0);
+        if (status!=CR_SUCCESS) throw std::runtime_error("Transport instance lookup failed, CR="+std::to_string(status));
+        return !same_instance(instance,selected);
+    });
+    if (paths.empty()) throw std::runtime_error("LHDC transport driver is not bound/loaded for the selected Audio Sink");
+    if (paths.size()!=1) throw std::runtime_error("Multiple LHDC transport interfaces belong to the selected Audio Sink");
     handle_=CreateFileW(paths[0].path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,nullptr);
     if (handle_==INVALID_HANDLE_VALUE) win_error("Transport open");
     try {

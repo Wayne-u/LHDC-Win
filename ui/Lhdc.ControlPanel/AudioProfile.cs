@@ -2,7 +2,10 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 namespace Lhdc.ControlPanel;
-public sealed record AudioProfile(string Mode="lhdc",int SampleRate=48000,int Bits=24,int Kbps=400,bool AdaptiveBitrate=false);
+public sealed record AudioProfile(string Mode="lhdc",int SampleRate=48000,int Bits=16,int Kbps=400,bool AdaptiveBitrate=false);
+public sealed record DeviceChoice(string Instance,string Name,string Address) {
+    public string Label => $"{Name} · {Address}";
+}
 public sealed record Choice(int Value,string Label) {
     public override string ToString() => Label;
 }

@@ -20,7 +20,7 @@ NTSTATUS LhdcCreateAudioChild(WDFCHILDLIST list,
     UNREFERENCED_PARAMETER(identification);
     RtlInitUnicodeString(&id,LHDC_AUDIO_HARDWARE_ID);
     RtlInitUnicodeString(&instance,L"Audio0");
-    RtlInitUnicodeString(&description,L"Enco X4 LHDC Audio");
+    RtlInitUnicodeString(&description,L"LHDC Bluetooth Audio");
     RtlInitUnicodeString(&location,L"Bluetooth A2DP");
     status=WdfPdoInitAssignDeviceID(init,&id);
     if (!NT_SUCCESS(status)) goto fail;

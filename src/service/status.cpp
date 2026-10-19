@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include "control/rfcomm.hpp"
+#include "transport/windows.hpp"
 namespace lhdc {
 bool adaptive_bitrate_enabled() {
     DWORD enabled=0,size=sizeof(enabled);
@@ -46,13 +47,19 @@ void inspect_audio_service() {
     if(revision_error!=ERROR_SUCCESS && revision_error!=ERROR_FILE_NOT_FOUND) throw std::runtime_error("Cached capability revision read failed, Win32="+std::to_string(revision_error));
     const auto current_revision=capability_revision();
     if(peer_revision!=current_revision) caps.clear();
+    std::wstring peer_instance(4096,L'\0');DWORD peer_size=static_cast<DWORD>(peer_instance.size()*sizeof(wchar_t));
+    const auto peer_error=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerDeviceInstance",RRF_RT_REG_SZ,nullptr,peer_instance.data(),&peer_size);
+    if (peer_error!=ERROR_SUCCESS && peer_error!=ERROR_FILE_NOT_FOUND) throw WindowsError("Cached peer identity read",peer_error);
+    const auto target=discover_target();
+    if (peer_error==ERROR_FILE_NOT_FOUND || !target || !same_instance(peer_instance.c_str(),target->instance)) caps.clear();
     DWORD mtu=0,mtu_size=sizeof(mtu);
     const auto mtu_error=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"PeerMediaMtu",RRF_RT_REG_DWORD,nullptr,&mtu,&mtu_size);
     if(mtu_error!=ERROR_SUCCESS && mtu_error!=ERROR_FILE_NOT_FOUND) throw std::runtime_error("Media MTU cache read failed, Win32="+std::to_string(mtu_error));
+    if (caps.empty()) mtu=0;
     DWORD active=0,active_size=sizeof(active);
     const auto active_error=RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\LHDC-Win",L"ActiveBitrate",RRF_RT_REG_DWORD,nullptr,&active,&active_size);
     if(active_error!=ERROR_SUCCESS && active_error!=ERROR_FILE_NOT_FOUND) throw std::runtime_error("Active bitrate read failed, Win32="+std::to_string(active_error));
-    if(status.dwCurrentState!=SERVICE_RUNNING) active=0;
+    if(status.dwCurrentState!=SERVICE_RUNNING || !target || !same_instance(target->service,L"lhdc-transport")) active=0;
     std::cout << "{\"event\":\"audio_service\",\"installed\":true,\"running\":" << (status.dwCurrentState==SERVICE_RUNNING?"true":"false")
         << ",\"state\":" << status.dwCurrentState << ",\"pid\":" << status.dwProcessId << ",\"profile_editable\":" << (writable==ERROR_SUCCESS?"true":"false")
         << ",\"peer_capabilities\":" << json_string(avdtp::hex(caps)) << ",\"capability_revision\":"<<current_revision<<",\"media_mtu\":"<<mtu

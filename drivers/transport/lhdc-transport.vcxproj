@@ -33,6 +33,7 @@
     <SkipPackageVerification>true</SkipPackageVerification>
   </PropertyGroup>
   <ItemDefinitionGroup>
+    <Inf><SpecifyDriverVerDirectiveDate>false</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>false</SpecifyDriverVerDirectiveVersion></Inf>
     <ClCompile>
       <AdditionalIncludeDirectories>$(ProjectDir)..\..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError>

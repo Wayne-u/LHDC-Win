@@ -11,13 +11,16 @@ constexpr DWORD media_send_timeout_ms=500;
 static void cleanup_error(const char* event,const std::exception& error) {
     std::osyncstream(std::cerr) << "{\"event\":" << json_string(event) << ",\"message\":" << json_string(error.what()) << "}" << std::endl;
 }
-MediaSession::MediaSession(std::uint64_t remote,Profile profile)
-    :transport_(remote),volume_(std::make_unique<VolumeSync>(transport_)),protocol_(transport_,profile),profile_(profile) {}
+MediaSession::MediaSession(std::uint64_t remote,Profile profile,bool control_volume)
+    :transport_(remote),protocol_(transport_,profile),profile_(profile) {
+    if (control_volume) volume_=std::make_unique<VolumeSync>(transport_,absolute_volume_enabled());
+}
 void MediaSession::discover() {
     transport_.open();
     const auto info=transport_.info();
     std::osyncstream(std::cout) << "{\"event\":\"channel_open\",\"channel_id\":1,\"in_mtu\":" << info.InMtu << ",\"out_mtu\":" << info.OutMtu << "}\n";
     const auto endpoints=av::endpoints(protocol_.accept(av::Signal::discover));
+    std::string incompatible;
     for (const auto& endpoint:endpoints) {
         if (!endpoint.sink || endpoint.media_type!=0 || endpoint.in_use) continue;
         const auto caps=protocol_.accept(av::Signal::get_capabilities,{static_cast<std::uint8_t>(endpoint.seid<<2)});
@@ -28,10 +31,11 @@ void MediaSession::discover() {
             if (vendor && vendor->vendor_id==av::lhdc_v5_vendor && vendor->codec_id==av::lhdc_v5_codec) v5=true;
         }
         if (!v5) continue;
-        av::v5_capabilities(caps);
+        try { av::select_configuration(caps,profile_); }
+        catch (const std::runtime_error& error) { incompatible=error.what();continue; }
         peer_caps_=caps; remote_seid_=endpoint.seid; break;
     }
-    if (!remote_seid_) throw std::runtime_error("No available LHDC V5 endpoint");
+    if (!remote_seid_) throw std::runtime_error(incompatible.empty()?"No available LHDC V5 endpoint":"No compatible LHDC V5 endpoint: "+incompatible);
 }
 bool MediaSession::configured_for(Profile profile) const {
     return stream_ && stream_->state()==av::StreamState::configured &&
@@ -68,6 +72,15 @@ void MediaSession::poll_idle() {
     // over afterwards. No background reader may race a configuration exchange.
     protocol_.poll_peer(5);
 }
+void MediaSession::close_prepared() {
+    stream_->close();protocol_.set_configuration({});
+    transport_.close(LHDC_CHANNEL_MEDIA);transport_.close();
+    for (const auto channel:{LHDC_CHANNEL_SIGNAL,LHDC_CHANNEL_MEDIA}) {
+        const auto state=transport_.info(channel);
+        if (state.Connected || state.PendingRequests) throw std::runtime_error("Compatibility probe left an active channel or pending request");
+    }
+    finished_=true;
+}
 void MediaSession::start(std::uint32_t block_samples) {
     stream_->media_ready(); stream_->start();
     std::osyncstream(std::cout) << "{\"event\":\"stream_started\",\"sample_rate\":" << profile_.sample_rate << ",\"bits\":" << profile_.bits
@@ -85,7 +98,7 @@ void MediaSession::start(std::uint32_t block_samples) {
     });
 }
 void MediaSession::check() {
-    volume_->check();
+    if (volume_) volume_->check();
     if (signal_failed_.load()) throw std::runtime_error("Signalling monitor failed during media transmission");
 }
 bool MediaSession::supports_bitrate(Profile profile) const {
@@ -155,5 +168,18 @@ MediaSession::~MediaSession() {
     for (const auto channel:{LHDC_CHANNEL_MEDIA,LHDC_CHANNEL_SIGNAL}) {
         try { transport_.close(channel); } catch (const std::exception& error) { cleanup_error("channel_cleanup_failed",error); }
     }
+}
+void inspect_playback_compatibility(Profile profile) {
+    av::Bytes caps;
+    ULONG mtu=0;
+    {
+        MediaSession session(target_device().address,profile,false);
+        session.discover();session.configure(profile);session.open_media();
+        caps=session.peer_capabilities();mtu=session.media_info().OutMtu;
+        if (encoded_frame_bytes(profile)>mtu-media_header_bytes) throw std::runtime_error("Selected bitrate exceeds the negotiated media MTU");
+        session.close_prepared();
+    }
+    std::cout<<"{\"event\":\"playback_compatibility\",\"compatible\":true,\"peer_capabilities\":"<<json_string(av::hex(caps))
+        <<",\"media_mtu\":"<<mtu<<",\"stream_started\":false}"<<std::endl;
 }
 }

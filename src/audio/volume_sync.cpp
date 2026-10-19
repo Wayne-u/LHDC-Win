@@ -2,6 +2,7 @@
 #include "windows_audio.hpp"
 #include "avrcp/protocol.hpp"
 #include "host/json.hpp"
+#include "volume_memory.hpp"
 #include <endpointvolume.h>
 #include <wrl/implements.h>
 #include <future>
@@ -9,6 +10,8 @@
 #include <syncstream>
 #include <optional>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 namespace lhdc {
 namespace {
 namespace av=avrcp;
@@ -31,7 +34,27 @@ void send_media_command(av::MediaCommand command) {
         throw WindowsError("Media command dispatch",GetLastError());
 }
 constexpr GUID volume_context={0xd9c90dc2,0x245d,0x47ac,{0x9c,0x70,0x31,0xcf,0x1a,0x15,0x30,0xb6}};
-ComPtr<IAudioEndpointVolume> headphone_volume() {
+std::wstring volume_key() {
+    std::wostringstream key;key<<L"SOFTWARE\\LHDC-Win\\Volume\\"<<std::uppercase<<std::hex<<std::setfill(L'0')<<std::setw(12)<<target_device().address;
+    return key.str();
+}
+std::optional<VolumeMemory> saved_volume() {
+    VolumeMemory value{};DWORD size=sizeof(value);
+    const auto status=RegGetValueW(HKEY_LOCAL_MACHINE,volume_key().c_str(),L"State",RRF_RT_REG_BINARY,nullptr,&value,&size);
+    if (status==ERROR_FILE_NOT_FOUND) return {};
+    if (status!=ERROR_SUCCESS) throw WindowsError("Volume memory read",status);
+    if (size!=sizeof(value) || !valid_volume_memory(value)) throw std::runtime_error("Invalid saved headphone volume");
+    return value;
+}
+void save_volume(const VolumeMemory& value) {
+    HKEY key=nullptr;
+    auto status=RegCreateKeyExW(HKEY_LOCAL_MACHINE,volume_key().c_str(),0,nullptr,0,KEY_SET_VALUE,nullptr,&key,nullptr);
+    if (status!=ERROR_SUCCESS) throw WindowsError("Volume memory key",status);
+    status=RegSetValueExW(key,L"State",0,REG_BINARY,reinterpret_cast<const BYTE*>(&value),sizeof(value));
+    RegCloseKey(key);
+    if (status!=ERROR_SUCCESS) throw WindowsError("Volume memory write",status);
+}
+ComPtr<IAudioEndpointVolume> headphone_volume(bool absolute) {
     ComPtr<IMMDeviceEnumerator> enumerator;
     audio_check(CoCreateInstance(__uuidof(MMDeviceEnumerator),nullptr,CLSCTX_ALL,IID_PPV_ARGS(&enumerator)),"Volume enumerator");
     ComPtr<IMMDeviceCollection> devices;
@@ -48,8 +71,8 @@ ComPtr<IAudioEndpointVolume> headphone_volume() {
     }
     if(!found) throw std::runtime_error("LHDC headphone volume endpoint is unavailable");
     DWORD support=0;audio_check(found->QueryHardwareSupport(&support),"Headphone volume hardware support");
-    if((support&(ENDPOINT_HARDWARE_SUPPORT_VOLUME|ENDPOINT_HARDWARE_SUPPORT_MUTE))!=3)
-        throw std::runtime_error("Audio driver must expose AVRCP hardware volume and mute before playback");
+    if ((support&3)!=(absolute?3u:0u))
+        throw std::runtime_error("Installed audio topology differs from the selected volume mode; reapply the audio driver");
     return found;
 }
 class VolumeEvents final:public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,IAudioEndpointVolumeCallback> {
@@ -59,7 +82,7 @@ public:
     HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA data) override {
         if(!data) return E_POINTER;
         if(IsEqualGUID(data->guidEventContext,volume_context)) return S_OK;
-        // PCM has no master attenuation; preserve the pre-mute scalar in Windows.
+        // Keep the pre-mute scalar separate from mute in both gain modes.
         if(!std::isfinite(data->fMasterVolume) || data->fMasterVolume<0 || data->fMasterVolume>1) return E_INVALIDARG;
         const auto value=av::absolute_volume(data->fMasterVolume)|(data->bMuted?128:0);
         auto previous=state.load();
@@ -70,18 +93,37 @@ public:
 struct VolumeNotifications {
     ComPtr<IAudioEndpointVolume> endpoint;
     ComPtr<VolumeEvents> events=Microsoft::WRL::Make<VolumeEvents>();
-    VolumeNotifications():endpoint(headphone_volume()) {
+    bool restored=false;
+    bool absolute;
+    std::optional<std::uint64_t> remembered;
+    explicit VolumeNotifications(bool use_absolute):endpoint(headphone_volume(use_absolute)),absolute(use_absolute) {
         audio_check(endpoint->RegisterControlChangeNotify(events.Get()),"Volume notification registration");
         float scalar=0;BOOL muted=FALSE;
         audio_check(endpoint->GetMasterVolumeLevelScalar(&scalar),"Initial Windows volume");
         audio_check(endpoint->GetMute(&muted),"Initial Windows mute");
         std::uint64_t initial=0;
         events->state.compare_exchange_strong(initial,av::absolute_volume(scalar)|(muted?128:0));
+        const auto saved=saved_volume();
+        initial=events->state.load();
+        if (saved && restore_volume_memory(*saved,absolute,initial>>8!=0) &&
+            events->state.compare_exchange_strong(initial,av::absolute_volume(saved->scalar)|(saved->muted?128:0))) {
+            audio_check(endpoint->SetMasterVolumeLevelScalar(saved->scalar,&volume_context),"Remembered headphone volume");
+            audio_check(endpoint->SetMute(saved->muted!=0,&volume_context),"Remembered headphone mute");
+            restored=true;
+        }
     }
     ~VolumeNotifications() { endpoint->UnregisterControlChangeNotify(events.Get()); }
     void remote(std::uint8_t value) {
         audio_check(endpoint->SetMasterVolumeLevelScalar(value/127.0f,&volume_context),"Remote headphone volume feedback");
         audio_check(endpoint->SetMute(FALSE,&volume_context),"Remote headphone mute feedback");
+    }
+    void remember(std::uint64_t snapshot) {
+        if (remembered==snapshot) return;
+        VolumeMemory value;value.absolute=absolute;BOOL muted=FALSE;
+        audio_check(endpoint->GetMasterVolumeLevelScalar(&value.scalar),"Volume memory scalar");
+        audio_check(endpoint->GetMute(&muted),"Volume memory mute");value.muted=muted!=FALSE;
+        if (events->state.load()!=snapshot) return;
+        save_volume(value);remembered=snapshot;
     }
 };
 class Controller {
@@ -137,7 +179,7 @@ private:
 void synchronize(Transport& transport,std::stop_token stop,std::promise<void>& ready,bool& announced) {
     const auto hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);audio_check(hr,"AVRCP COM initialization");
     struct Apartment { ~Apartment(){CoUninitialize();} } apartment;
-    VolumeNotifications volume;
+    VolumeNotifications volume(true);
     Controller controller(transport);
     controller.send(av::capabilities(1));
     if(!av::supports_volume(controller.wait(1,av::get_capabilities))) throw std::runtime_error("Headphones do not support AVRCP volume notifications");
@@ -146,7 +188,7 @@ void synchronize(Transport& transport,std::stop_token stop,std::promise<void>& r
     auto initial_state=volume.events->state.load();
     // Recreated endpoints default to 100%. Start from the actual headphone gain,
     // unless Windows is muted or the user changed its slider during negotiation.
-    if(initial_state<128 && volume.events->state.compare_exchange_strong(initial_state,initial)) {
+    if(!volume.restored && initial_state<128 && volume.events->state.compare_exchange_strong(initial_state,initial)) {
         volume.remote(initial);initial_state=initial;
     }
     const auto requested=static_cast<std::uint8_t>((initial_state&128)?0:initial_state&127);
@@ -160,6 +202,7 @@ void synchronize(Transport& transport,std::stop_token stop,std::promise<void>& r
     // No PCM is sent until the peer acknowledges the initial Windows level.
     if(confirmed!=requested && volume.events->state.compare_exchange_strong(initial_state,(initial_state&~255ull)|confirmed)) volume.remote(confirmed);
     std::osyncstream(std::cout)<<"{\"event\":\"avrcp_volume_ready\",\"previous_remote\":"<<unsigned(initial)<<",\"requested\":"<<unsigned(requested)<<",\"confirmed\":"<<unsigned(confirmed)<<",\"pcm_master_gain\":1}"<<std::endl;
+    volume.remember(volume.events->state.load());
     ready.set_value();
     announced=true;
     std::uint8_t label=4;
@@ -199,14 +242,30 @@ void synchronize(Transport& transport,std::stop_token stop,std::promise<void>& r
             }
         }
         if(pending && std::chrono::steady_clock::now()>deadline) throw std::runtime_error("AVRCP volume change was not acknowledged");
+        volume.remember(volume.events->state.load());
     }
+    volume.remember(volume.events->state.load());
+}
+void software_volume(std::stop_token stop,std::promise<void>& ready,bool& announced) {
+    ComApartment apartment(COINIT_MULTITHREADED);
+    VolumeNotifications volume(false);
+    volume.remember(volume.events->state.load());
+    ready.set_value();announced=true;
+    while (!stop.stop_requested()) {
+        volume.remember(volume.events->state.load());
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    volume.remember(volume.events->state.load());
 }
 }
-VolumeSync::VolumeSync(Transport& transport) {
+VolumeSync::VolumeSync(Transport& transport,bool absolute) {
     std::promise<void> ready;auto future=ready.get_future();
-    worker_=std::jthread([this,&transport,ready=std::move(ready)](std::stop_token stop) mutable {
+    worker_=std::jthread([this,&transport,absolute,ready=std::move(ready)](std::stop_token stop) mutable {
         bool announced=false;
-        try { synchronize(transport,stop,ready,announced); }
+        try {
+            if (absolute) synchronize(transport,stop,ready,announced);
+            else software_volume(stop,ready,announced);
+        }
         catch(...) {
             error_=std::current_exception();failed_.store(true);
             if(!announced) ready.set_exception(error_);
@@ -216,4 +275,29 @@ VolumeSync::VolumeSync(Transport& transport) {
 }
 VolumeSync::~VolumeSync() {worker_.request_stop();worker_.join();}
 void VolumeSync::check() const {if(failed_.load()) std::rethrow_exception(error_);}
+void inspect_absolute_volume() {
+    std::string reason;
+    std::optional<unsigned> initial;
+    for (unsigned attempt=0;attempt<3;++attempt) {
+        try {
+            Transport transport(target_device().address);
+            Controller controller(transport);
+            controller.send(av::capabilities(1));
+            if (av::supports_volume(controller.wait(1,av::get_capabilities))) {
+                controller.send(av::notification(2));
+                initial=av::volume_value(controller.wait(2,av::register_notification));
+            } else reason="Peer does not advertise volume notifications";
+            break;
+        } catch (const WindowsError& error) {
+            reason=error.what();
+            // Native AVCTP teardown can lag behind PnP's disabled state.
+            if ((error.code!=ERROR_REQ_NOT_ACCEP && error.code!=ERROR_BUSY) || attempt==2) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        } catch (const std::exception& error) { reason=error.what();break; }
+    }
+    std::cout<<"{\"event\":\"absolute_volume_probe\",\"supported\":"<<(initial?"true":"false")
+        <<",\"reason\":"<<json_string(reason);
+    if (initial) std::cout<<",\"remote_volume\":"<<*initial;
+    std::cout<<"}"<<std::endl;
+}
 }

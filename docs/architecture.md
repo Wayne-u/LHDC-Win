@@ -1,5 +1,7 @@
 # 架构
 
+本文描述 0.8.7 通用 LHDC V5 播放模式。发布前的修复候选已在 Enco X4 验证统一音量和断开重连记忆，其他型号及软件音量路径尚未实测；具体条件与历史版本记录见验证状态。
+
 ## 音频路径与组件
 
 ```mermaid
@@ -10,11 +12,11 @@ flowchart LR
     Reader --> Queue[120 ms 有界队列 / 丢弃过时 PCM]
     Queue --> Encode[LHDC V5 / RTP]
     Encode --> Transport[KMDF 蓝牙传输]
-    Transport --> Earbuds[Enco X4]
+    Transport --> Earbuds[所选 LHDC V5 耳机]
     Endpoint --> HFP[Windows 原生 HFP]
     HFP --> Earbuds
     Panel[配置面板] --> Profile[采样率 / 位深 / 码率]
-    Panel --> Control[HeyMelody RFCOMM / Hi-Res]
+    Panel --> Control[可选 HeyMelody / 已知兼容型号]
     Control --> Earbuds
     Profile --> Encode
 ```
@@ -35,7 +37,7 @@ flowchart LR
 
 Hi-Res 查询为 `0x010D`、payload `01 18`；设置为 `0x0403`、payload `18 01/00`。只有设置响应成功且再次查询值一致才报告切换成功。未知值保留为未知，不能当成关闭。协议来源与归属见 [NOTICE](../NOTICE.md)。
 
-开关改变后清除旧能力缓存并增加能力代次，服务重新建立 AVDTP 会话、读取真实能力；缓存代次不匹配时不向面板提供旧参数。高格式安装还会读回耳机 Hi-Res 状态。关闭前拒绝尚在使用高采样率/码率的配置，避免把当前音乐链路切到不支持的参数。内核 PCM 缓冲按最大 192 kHz / 24 位容纳 200 ms，实际容量仍按所选格式限制。
+Hi-Res 控制仅对已知兼容的 Enco X4 显示，播放和安装不依赖此私有协议。开关改变后清除旧能力缓存并增加能力代次，服务重新建立 AVDTP 会话、读取真实能力；缓存代次或设备实例不匹配时不向面板提供旧参数。安装高格式通过实际 AVDTP 能力与配置读回校验。关闭前拒绝尚在使用高采样率/码率的配置，避免把当前音乐链路切到不支持的参数。内核 PCM 缓冲按最大 192 kHz / 24 位容纳 200 ms，实际容量仍按所选格式限制。
 
 `LHDC-Win` 是 LocalSystem 自动服务，二进制位于仅管理员可写的 `%ProgramFiles%\LHDC-Win`。它管理活动控制台会话内的无窗口工作进程，以观察桌面应用的 Core Audio 通话状态。工作进程仍以 LocalSystem 运行；停止事件仅允许 SYSTEM/Administrators 访问，Job Object 在服务退出时回收进程，会话变化时重新建立。
 
@@ -92,9 +94,11 @@ PCM 丢弃同时按采样帧记录间断；原始浮点 PCM 和转换后整数 P
 
 ## 音量与通话
 
-Windows 硬件主音量/静音通过 AVRCP SetAbsoluteVolume 同步耳机；PCM 主增益为 1，耳机执行主音量衰减，应用音量仍由 Windows 管理。VolumeChanged 回写 Windows。起播读取耳机当前增益，重连不重复设置相同值，控制失败不静默切到满音量。
+安装时实际查询 AVRCP 音量通知能力，自动选择统一音量或软件音量。支持统一音量时，音频拓扑声明硬件音量／静音，服务在输出 PCM 前确认远端增益，并将耳机音量通知同步到 Windows；Windows 不再对端点重复衰减。不支持时，拓扑直接连接输入与输出，Windows 音频引擎对 PCM 应用音量和静音，耳机自身增益独立。应用音量始终由 Windows 管理，受保护 PCM 的拒绝导出逻辑继续生效。
 
-本机原生 AVRCP 控制器端（0x110E）会在重连后抢先占用 AVCTP 通道，使 LHDC 打开请求返回 `STATUS_REQUEST_NOT_ACCEPTED`。LHDC 模式只停用目标耳机的这一端，由工作进程接管音量与播放、暂停、停止、上下首等按键；按键转换为当前桌面的 Windows 媒体命令。原生 AVRCP 目标端和 HFP 保留。原始启用状态保存在受保护的 `%ProgramData%\LHDC-Win\native-avrcp.json`，恢复 Windows 模式时还原；服务在建立 LHDC 会话前再次检查控制器所有权。
+统一音量仅接管所选耳机的原生 AVRCP 控制器端，避免与私有 AVRCP 通道冲突；目标端及 HFP 保留。软件音量和恢复 Windows 模式时，按 `%ProgramData%\LHDC-Win\native-avrcp.json` 保存的原始状态释放控制器。`Device\AbsoluteVolume` 保存选定模式，`NativeAvrcpInstance` 保存精确控制器实例；两者只允许管理员修改。不同耳机的音量和按键仍需实机验证。
+
+服务按蓝牙地址将音量标量、静音和模式保存到 `HKLM\SOFTWARE\LHDC-Win\Volume\<地址>\State`，重建会话后恢复同模式记录，用户在协商期间的新操作优先。没有记录时，统一音量读取耳机当前增益，避免新端点默认 100% 导致音量突增。安装器迁移旧端点音量时不高于查询到的远端增益。切换模式同时刷新 JACK 配置标识，并核验端点实际硬件音量标志。
 
 Windows 原生统一端点负责 HFP 路由及所需的 16 kHz 单声道转换。麦克风使用期间工作进程暂停 LHDC，结束后重建音乐传输。原生麦克风保持启用，项目不再向独立 HFP 输出转送音乐。
 
@@ -102,17 +106,19 @@ Windows 原生统一端点负责 HFP 路由及所需的 16 kHz 单声道转换�
 
 ## 传输与部署
 
-软件枚举 Windows 已配对的 Audio Sink，以硬件 ID 和蓝牙设备名称识别 Enco X4，读取本机实例及地址。面板、服务和部署工具共用这一发现逻辑，不要求用户填写设备标识；没有匹配时报告未发现，多台匹配时报错，部署工具再次核验传入实例，避免误绑其他耳机。目标仍限定为已验证的 Enco X4 开发路径，不代表通用设备适配。
+软件枚举 Windows 已配对的标准 Audio Sink，使用服务 GUID 和实际设备实例读取地址、名称、ContainerId 与驱动状态，不按品牌、VID/PID 或名称过滤播放目标。面板允许在多个配对设备中选择。安装器将实例保存至管理员可写的 `HKLM\SOFTWARE\LHDC-Win\Device\InstanceId`，服务只操作这一实例；设备消失时不转用其他耳机。没有保存选择时，已有唯一 LHDC 绑定或唯一候选可作为默认，多台候选必须明确选择。一次只管理一台 LHDC 耳机，换设备前恢复原设备的 Windows 音频。
 
-传输 ABI v3 位于 `include/lhdc_transport.h`。信令、媒体、AVRCP 的 ChannelId 为 1、2、3，各有独立队列，避免控制空读阻塞媒体。信令和 AVRCP 保持顺序队列；媒体最多四个 BRB 在途，队列级同步串行执行提交回调，完成回调通过状态锁更新计数。打开与关闭拒绝未完成的同通道操作。SDP 校验 Audio Sink 的 PSM 0x0019/AVDTP 与 AVRCP Target 的 PSM 0x0017；媒体要求信令已建立，AVRCP 可独立建连，回收顺序为 AVRCP、媒体、信令。
+INF 用私有硬件 ID 加标准 Audio Sink 兼容 ID 注册模型，真实蓝牙设备只匹配兼容 ID；安装仍逐实例执行。安装或更新时需连接耳机，绑定后依次进行 Discover、能力交集、SetConfiguration/GetConfiguration、媒体 Open/MTU 和 Close 校验，不发送音频。失败进入现有 Windows 驱动恢复路径。可选 Content Protection 能力不直接阻挡未请求保护的配置，必须保护的对端仍可拒绝配置；不放宽当前编码器的 LHDC V5 版本、5 ms 帧、采样格式与单帧 MTU 要求。
 
-服务完成 Discover、能力交集、SetConfiguration/GetConfiguration、Open、Start 与结束回收。媒体首选 MTU 为 4096 字节，实际值以蓝牙协商结果为准，本机 Enco X4 当前返回 679 字节；RTP/LHDC 头占 14 字节。信令与 AVRCP 保留默认 MTU 偏好。AVRCP 50 ms 接收超时只取消当前读，不取消媒体发送；原生 AVRCP 目标端与 HFP 设备保留。
+传输 ABI v3 位于 `include/lhdc_transport.h`。信令、媒体、AVRCP 的 ChannelId 为 1、2、3，各有独立队列；统一音量模式使用 AVRCP 通道，软件音量模式不依赖它。信令保持顺序队列；媒体最多四个 BRB 在途，队列级同步串行执行提交回调，完成回调通过状态锁更新计数。打开与关闭拒绝未完成的同通道操作。标准 Audio Sink 的枚举由 Windows SDP 完成，传输直接使用标准 PSM 0x0019，删除对同一服务记录的私有 SDP 预检。媒体要求信令已建立。
 
-0.8.6 在空闲阶段完成 SDP／AVDTP 能力发现、更新能力缓存，按用户设置执行 SetConfiguration／GetConfiguration，并保留 AVRCP 音量和按键控制。服务线程以 5 ms 初始接收期限处理空闲信令，只忽略没有开始消息的接收超时；已经开始的分片消息必须收齐，分片中途超时使会话失败并回收，不能丢掉半条消息后继续协商。收到真实 Running 后按该次格式核对配置；相同则复用，不同则先 Abort 旧配置再配置和校验。仅此时才 Open 媒体通道，Start 完成后将唯一信令读者交给流监听线程，避免与事务响应竞争。媒体通道不长期空闲，连接错误后仍重建会话；对端 Close／Abort 已接受时不再重复 Abort，对端 Suspend 仍需清理配置。
+服务完成 Discover、能力交集、SetConfiguration/GetConfiguration、Open、Start 与结束回收。媒体首选 MTU 为 4096 字节，实际值以蓝牙协商结果为准；Enco X4 历史测试返回 679 字节，其他耳机不写死此值。RTP/LHDC 头占 14 字节，信令保留默认 MTU 偏好。能力缓存记录 `PeerDeviceInstance`，查询另一台设备时不使用旧能力或旧 MTU。
+
+服务在空闲阶段完成 AVDTP 能力发现、更新能力缓存，按用户设置执行 SetConfiguration／GetConfiguration。服务线程以 5 ms 初始接收期限处理空闲信令，只忽略没有开始消息的接收超时；已经开始的分片消息必须收齐，分片中途超时使会话失败并回收，不能丢掉半条消息后继续协商。收到真实 Running 后按该次格式核对配置；相同则复用，不同则先 Abort 旧配置再配置和校验。仅此时才 Open 媒体通道，Start 完成后将唯一信令读者交给流监听线程，避免与事务响应竞争。媒体通道不长期空闲，连接错误后仍重建会话；对端 Close／Abort 已接受时不再重复 Abort，对端 Suspend 仍需清理配置。
 
 Start 前后核验 PCM Epoch 和运行状态，发现协商期间停止或换流时回收本次会话。`media_control_ready` 记录提前准备耗时和 `configuration_prepared`；`direct_audio_prepare` 记录空闲时长；`media_startup_complete` 分别记录配置／打开、Start 前准备、Start 事务、起播缓冲／内核丢弃、是否请求重置和 `configuration_reused`。预缓冲仍为 20 ms，超过 100 ms 起播积压或发生内核溢出时的原有清理策略保留，不能用扩大缓冲掩盖剩余建连耗时。冷连接、实际格式变化和媒体建连仍需时间，本实现不保证短提示音开头完整；Windows 持续输出静音且保持 Running 时，也不会触发空闲等待。
 
-`Set-AudioMode.ps1` 校验签名、目录成员和目标实例，仅操作自动发现的目标耳机。恢复 Windows 时停止并禁用服务、移除子设备、恢复 `BthA2dp / microsoft_bluetooth_a2dp_src.inf` 及原生访问权限/SRC 接口，然后核验双声道端点。部署状态位于 `%ProgramData%\LHDC-Win\deployment.json`，不依赖测试日志。
+`Set-AudioMode.ps1` 校验签名、目录成员和目标实例，仅操作自动发现的目标耳机。重绑驱动前停止 AudioEndpointBuilder 及其运行中的依赖，释放端点和音频引擎句柄，结束后恢复原服务状态。恢复 Windows 时停止并禁用 LHDC 服务、移除子设备、恢复 `BthA2dp / microsoft_bluetooth_a2dp_src.inf` 及原生访问权限/SRC 接口，然后核验双声道端点。部署状态位于 `%ProgramData%\LHDC-Win\deployment.json`，不依赖测试日志。
 
 后台日志位于 `%ProgramData%\LHDC-Win\service.jsonl`，面板日志位于 `%LOCALAPPDATA%\LHDC-Win`。传输 WPP provider 为 `{67A00BC6-98CB-4A32-9CB0-50C97716C708}`，PDB/TMF 位于对应驱动构建目录。
 

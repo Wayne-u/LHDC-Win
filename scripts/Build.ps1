@@ -51,6 +51,7 @@ if ($Target -eq 'Audio') {
     Copy-Item -LiteralPath (Join-Path $reference 'audio/simpleaudiosample/Source') -Destination $prepared -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'drivers/audio/minipairs.h') -Destination (Join-Path $prepared 'Source/Filters/minipairs.h') -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'drivers/audio/speakerwavtable.h') -Destination (Join-Path $prepared 'Source/Filters/speakerwavtable.h') -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'drivers/audio/speakertoptable.h') -Destination (Join-Path $prepared 'Source/Filters/speakertoptable.h') -Force
 
     function Replace-Source([string]$Relative,[string]$Pattern,[string]$Replacement,[int]$ExpectedCount=1) {
         $path=Join-Path $prepared $Relative
@@ -137,12 +138,6 @@ $2
     Replace-Source $stream '    m_SaveData.Disable\(drmRights->CopyProtect\);' '    m_pMiniport->m_LhdcPcm.SetProtected(drmRights->CopyProtect != FALSE);'
     Replace-Source 'Source/Main/minwavertstream.h' '(?m)^#include "savedata.h"\r?\n#include "ToneGenerator.h"' ''
     Replace-Source 'Source/Main/minwavertstream.h' '(?m)^    CSaveData +m_SaveData;\r?\n    ToneGenerator +m_ToneGenerator;' ''
-    # Topology volume/mute is backed by the service's acknowledged AVRCP commands.
-    # Windows must leave PCM master gain at unity; the headphones apply it once.
-    $topology='Source/Filters/speakertoptable.h'
-    # Windows derives the endpoint type, icon and localized name from this bridge pin.
-    Replace-Source $topology '&KSNODETYPE_SPEAKER' '&KSNODETYPE_HEADPHONES'
-    Replace-Source $topology '#define _SIMPLEAUDIOSAMPLE_SPEAKERTOPTABLE_H_' "#define _SIMPLEAUDIOSAMPLE_SPEAKERTOPTABLE_H_`n#include `"format_config.h`"`n#include `"connection.h`""
     Replace-Source 'Source/Inc/mintopo.h' '(?m)^public:' "public:`n    volatile LONG m_LhdcConnected = FALSE;`n    GUID m_LhdcContainer{};"
     Replace-Source 'Source/Main/mintopo.cpp' '#include "mintopo.h"' "#include `"mintopo.h`"`n#include `"connection.h`""
     Replace-Source 'Source/Main/mintopo.cpp' '(?m)^Done:\r?\n    return ntStatus;\r?\n\} // Init' @'
@@ -151,26 +146,10 @@ Done:
     return ntStatus;
 } // Init
 '@
-    Replace-Source $topology 'PropertyHandler_SpeakerTopoFilter' 'PropertyHandler_LhdcJack' 2
-    Replace-Source $topology '(?s)(PCPROPERTY_ITEM PropertiesSpeakerTopoFilter\[\] =\s+\{)' @'
-$1
-    {&KSPROPSETID_LHDC_CONNECTION,LHDC_CONNECTION_STATUS,
-     KSPROPERTY_TYPE_GET|KSPROPERTY_TYPE_SET|KSPROPERTY_TYPE_BASICSUPPORT,PropertyHandler_LhdcConnection},
-    {&KSPROPSETID_Jack,KSPROPERTY_JACK_CONTAINERID,
-     KSPROPERTY_TYPE_GET|KSPROPERTY_TYPE_BASICSUPPORT,PropertyHandler_LhdcJack},
-    {&KSPROPSETID_Jack,KSPROPERTY_JACK_DESCRIPTION3,
-     KSPROPERTY_TYPE_GET|KSPROPERTY_TYPE_BASICSUPPORT,PropertyHandler_LhdcJackConfig},
-'@
-    Replace-Source $topology 'DEFINE_PCAUTOMATION_TABLE_PROP\(AutomationSpeakerTopoFilter, PropertiesSpeakerTopoFilter\);' @'
-static PCEVENT_ITEM SpeakerJackEvents[] = {
-    {&KSEVENTSETID_PinCapsChange,KSEVENT_PINCAPS_JACKINFOCHANGE,
-     PCEVENT_ITEM_FLAG_ENABLE|PCEVENT_ITEM_FLAG_BASICSUPPORT,EventHandler_LhdcJack}
-};
-DEFINE_PCAUTOMATION_TABLE_PROP_EVENT(AutomationSpeakerTopoFilter,PropertiesSpeakerTopoFilter,SpeakerJackEvents);
-'@
     Replace-Source 'Source/Main/adapter.cpp' '    ntStatus = InstallAllRenderFilters\(DeviceObject, Irp, pAdapterCommon\);' @'
     ntStatus = LhdcLoadPlaybackFormat(&SpeakerHostPinSupportedDeviceFormats[0],&SpeakerPinDataRangesStream[0]);
     IF_FAILED_JUMP(ntStatus, Exit);
+    LhdcConfigureVolumeTopology();
     ntStatus = InstallAllRenderFilters(DeviceObject, Irp, pAdapterCommon);
 '@
     # Absolute volume is one gain shared by both stereo channels.

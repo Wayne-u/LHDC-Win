@@ -7,7 +7,7 @@ namespace lhdc {
 // Only this worker accesses AVRCP. Bluetooth control never blocks PCM consumption.
 class VolumeSync {
 public:
-    explicit VolumeSync(Transport& transport);
+    VolumeSync(Transport& transport,bool absolute);
     ~VolumeSync();
     VolumeSync(const VolumeSync&)=delete;
     void check() const;
@@ -16,4 +16,5 @@ private:
     std::atomic<bool> failed_=false;
     std::jthread worker_;
 };
+void inspect_absolute_volume();
 }

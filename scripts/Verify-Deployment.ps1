@@ -56,6 +56,7 @@ try {
     $inf=Join-Path $package 'lhdc-transport.inf'
     Test-Command 'reject-other-snapshot' @('snapshot',$wrongInstance) 1
     Test-Command 'reject-other-candidates' @('candidates',$wrongInstance,$inf) 1
+    Test-Command 'reject-other-selection' @('select',$wrongInstance) 1
     Test-Command 'reject-other-install' @('install',$wrongInstance,$inf,$certificate) 1
     Test-Command 'reject-other-restore' @('restore',$wrongInstance) 1
     $stateText=& $deviceTool readiness
@@ -64,6 +65,15 @@ try {
     $discovery=@(& (Join-Path $projectRoot 'build/host/lhdc-host.exe') target)
     if($LASTEXITCODE -ne 0) { throw 'Target discovery failed.' }
     $target=$discovery[-1] | ConvertFrom-Json
+    if ($target.found) {
+        Test-Command 'generic-compatible-candidate' @('candidates',$target.instance,$inf) 0
+        $generic=$cases[-1].Records | Where-Object event -eq 'candidate'
+        Test-Command 'inbox-a2dp-candidate' @('candidates',$target.instance,(Join-Path $env:windir 'INF/microsoft_bluetooth_a2dp_src.inf')) 0
+        $inbox=$cases[-1].Records | Where-Object event -eq 'candidate'
+        if ($null -eq $generic.rank -or $null -eq $inbox.rank -or $generic.rank -le $inbox.rank) {
+            throw 'The generic LHDC package must rank below the inbox A2DP driver; installation must select it explicitly.'
+        }
+    }
     if ($target.found -and (-not $state.administrator -or -not $state.test_signing_active)) {
         # This test is only safe while a mandatory, non-mutating guard is false.
         Test-Command 'reject-install-without-prerequisites' @('install',$target.instance,$inf,$certificate) 1
