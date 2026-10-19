@@ -246,7 +246,9 @@ try {
         throw '请先把当前使用 LHDC 的耳机恢复为 Windows 音频，再切换到另一台耳机。'
     }
     $result.Before=Invoke-Native $deviceTool @('snapshot',$target) 'before'
-    if ($result.Before.service -notin @('BthA2dp','lhdc-transport')) { throw 'The target has an unrelated audio driver.' }
+    if ($result.Before.service -notin @('BthA2dp','lhdc-transport')) {
+        throw "所选耳机当前使用其他音频驱动（$($result.Before.service)）。请先通过原驱动工具或设备管理器将这台耳机恢复为微软蓝牙 A2DP 驱动，再重试。"
+    }
     if ($Mode -eq 'Windows') {
         $bound=$result.Before.service -eq 'lhdc-transport'
         Stop-LhdcService
@@ -279,7 +281,12 @@ try {
             throw 'LHDC requires Windows 11 22H2 or later (build 22621+), running on x64 hardware.'
         }
         $result.Readiness=Invoke-Native $deviceTool @('readiness') 'readiness'
-        if (-not $result.Readiness.test_signing_active -or $result.Readiness.hvci_kernel_enforced) { throw 'The existing test driver loading conditions are not satisfied.' }
+        if (-not $result.Readiness.test_signing_active) {
+            throw '当前系统的测试签名模式尚未生效。请按项目说明启用测试模式并完成重启，再重试安装。'
+        }
+        if ($result.Readiness.hvci_kernel_enforced) {
+            throw '当前系统正在强制执行内存完整性（HVCI），不满足本测试签名驱动的加载条件。请按项目说明检查驱动加载配置后重试。'
+        }
         # Stored rate/depth identify the encoder quality table. The
         # service follows live Windows PCM and validates the actual peer.
         $result.Profile=Invoke-Native $hostTool @('profile-check',"$SampleRate","$Bits","$Kbps") 'profile'

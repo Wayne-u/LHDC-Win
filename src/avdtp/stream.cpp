@@ -1,8 +1,8 @@
 #include "stream.hpp"
 #include <stdexcept>
 namespace lhdc::avdtp {
-Stream::Stream(Exchange exchange,std::uint8_t seid,Bytes configuration)
-    :exchange_(std::move(exchange)),configuration_(std::move(configuration)) {
+Stream::Stream(Exchange exchange,std::uint8_t seid,Bytes configuration,Bytes peer_capabilities)
+    :exchange_(std::move(exchange)),configuration_(std::move(configuration)),peer_capabilities_(std::move(peer_capabilities)) {
     if (!seid || seid>62) throw std::invalid_argument("Invalid remote stream endpoint");
     seid_={static_cast<std::uint8_t>(seid<<2)};
 }
@@ -13,14 +13,14 @@ void Stream::configure() {
     const auto accepted=exchange_(Signal::set_configuration,request);
     state_=StreamState::configured;
     if (!accepted.empty()) throw std::runtime_error("Unexpected SetConfiguration Accept payload");
-    verify_configuration(configuration_,exchange_(Signal::get_configuration,seid_));
-    configuration_verified_=true;
+    readback_=verify_configuration(configuration_,exchange_(Signal::get_configuration,seid_),peer_capabilities_);
 }
 void Stream::empty_accept(Signal signal) {
     if (!exchange_(signal,seid_).empty()) throw std::runtime_error("Unexpected stream Accept payload");
 }
 void Stream::open() {
-    if (state_!=StreamState::configured || !configuration_verified_) throw std::logic_error("Open requires a verified configuration");
+    if (state_!=StreamState::configured || readback_==ConfigurationReadback::unverified)
+        throw std::logic_error("Open requires an accepted configuration readback");
     empty_accept(Signal::open); state_=StreamState::opened;
 }
 void Stream::media_ready() {
@@ -37,10 +37,10 @@ void Stream::suspend() {
 }
 void Stream::close() {
     if (state_!=StreamState::opened) throw std::logic_error("Close requires an opened, suspended endpoint");
-    empty_accept(Signal::close); state_=StreamState::idle; media_ready_=false; configuration_verified_=false;
+    empty_accept(Signal::close); state_=StreamState::idle; media_ready_=false; readback_=ConfigurationReadback::unverified;
 }
 void Stream::abort() {
     if (state_==StreamState::idle) return;
-    empty_accept(Signal::abort); state_=StreamState::idle; media_ready_=false; configuration_verified_=false;
+    empty_accept(Signal::abort); state_=StreamState::idle; media_ready_=false; readback_=ConfigurationReadback::unverified;
 }
 }

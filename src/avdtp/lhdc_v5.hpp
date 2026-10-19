@@ -13,5 +13,7 @@ struct V5Capabilities {
 };
 V5Capabilities v5_capabilities(std::span<const std::uint8_t> raw);
 Bytes select_configuration(std::span<const std::uint8_t> peer_capabilities,const Profile& profile);
-void verify_configuration(std::span<const std::uint8_t> expected,std::span<const std::uint8_t> actual);
+enum class ConfigurationReadback { unverified,exact,capability_echo };
+ConfigurationReadback verify_configuration(std::span<const std::uint8_t> expected,
+    std::span<const std::uint8_t> actual,std::span<const std::uint8_t> peer_capabilities);
 }

@@ -1,6 +1,6 @@
 # 架构
 
-本文描述 0.8.7 通用 LHDC V5 播放模式。发布前的修复候选已在 Enco X4 验证统一音量和断开重连记忆，其他型号及软件音量路径尚未实测；具体条件与历史版本记录见验证状态。
+本文描述 0.8.8 通用 LHDC V5 播放模式。0.8.7 发布前的修复候选已在 Enco X4 验证统一音量和断开重连记忆；0.8.8 的配置读回兼容路径、其他型号及软件音量路径尚未实测，具体条件与历史版本记录见验证状态。
 
 ## 音频路径与组件
 
@@ -109,6 +109,8 @@ Windows 原生统一端点负责 HFP 路由及所需的 16 kHz 单声道转换�
 软件枚举 Windows 已配对的标准 Audio Sink，使用服务 GUID 和实际设备实例读取地址、名称、ContainerId 与驱动状态，不按品牌、VID/PID 或名称过滤播放目标。面板允许在多个配对设备中选择。安装器将实例保存至管理员可写的 `HKLM\SOFTWARE\LHDC-Win\Device\InstanceId`，服务只操作这一实例；设备消失时不转用其他耳机。没有保存选择时，已有唯一 LHDC 绑定或唯一候选可作为默认，多台候选必须明确选择。一次只管理一台 LHDC 耳机，换设备前恢复原设备的 Windows 音频。
 
 INF 用私有硬件 ID 加标准 Audio Sink 兼容 ID 注册模型，真实蓝牙设备只匹配兼容 ID；安装仍逐实例执行。安装或更新时需连接耳机，绑定后依次进行 Discover、能力交集、SetConfiguration/GetConfiguration、媒体 Open/MTU 和 Close 校验，不发送音频。失败进入现有 Windows 驱动恢复路径。可选 Content Protection 能力不直接阻挡未请求保护的配置，必须保护的对端仍可拒绝配置；不放宽当前编码器的 LHDC V5 版本、5 ms 帧、采样格式与单帧 MTU 要求。
+
+配置读回默认要求服务项和编解码数据与提交值一致。0.8.8 识别已采集到的能力原样返回行为：SetConfiguration 接受后，GetConfiguration 的 LHDC 数据必须逐字节等于同一端点刚才公布的能力，所选单一采样率、位深与码率范围须受该能力覆盖；服务项仅允许空媒体传输、一个 LHDC 编解码项，以及可选的一个空 Delay Reporting 项。重复项、未知新增项和编解码数据变化均拒绝。此路径记录 `configuration_accepted`、`configuration_readback=capability_echo`、`readback_verified=false`，使用提交值配置编码器；精确读回继续记录 `configuration_verified` 和 `exact`。安装探测的最终记录也包含校验方式。能力返回不能证明耳机的实际解码参数，媒体建连和听音须另行验证。
 
 传输 ABI v3 位于 `include/lhdc_transport.h`。信令、媒体、AVRCP 的 ChannelId 为 1、2、3，各有独立队列；统一音量模式使用 AVRCP 通道，软件音量模式不依赖它。信令保持顺序队列；媒体最多四个 BRB 在途，队列级同步串行执行提交回调，完成回调通过状态锁更新计数。打开与关闭拒绝未完成的同通道操作。标准 Audio Sink 的枚举由 Windows SDP 完成，传输直接使用标准 PSM 0x0019，删除对同一服务记录的私有 SDP 预检。媒体要求信令已建立。
 

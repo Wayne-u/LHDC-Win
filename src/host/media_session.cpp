@@ -39,6 +39,7 @@ void MediaSession::discover() {
 }
 bool MediaSession::configured_for(Profile profile) const {
     return stream_ && stream_->state()==av::StreamState::configured &&
+        stream_->configuration_readback()!=av::ConfigurationReadback::unverified &&
         profile.sample_rate==profile_.sample_rate && profile.bits==profile_.bits && profile.kbps==profile_.kbps;
 }
 void MediaSession::configure(Profile profile) {
@@ -49,9 +50,13 @@ void MediaSession::configure(Profile profile) {
         stream_->abort(); protocol_.set_configuration({}); stream_.reset();
     }
     profile_=profile; protocol_.set_profile(profile);
-    stream_.emplace([&](av::Signal signal,const av::Bytes& payload){return protocol_.accept(signal,payload);},remote_seid_,selected);
+    stream_.emplace([&](av::Signal signal,const av::Bytes& payload){return protocol_.accept(signal,payload);},remote_seid_,selected,peer_caps_);
     stream_->configure(); protocol_.set_configuration(selected);
-    std::osyncstream(std::cout) << "{\"event\":\"configuration_verified\",\"seid\":" << unsigned(remote_seid_) << ",\"raw\":" << json_string(av::hex(selected))
+    const bool exact=stream_->configuration_readback()==av::ConfigurationReadback::exact;
+    const auto event=exact?"configuration_verified":"configuration_accepted";
+    const auto readback=exact?"exact":"capability_echo";
+    std::osyncstream(std::cout) << "{\"event\":" << json_string(event) << ",\"seid\":" << unsigned(remote_seid_) << ",\"raw\":" << json_string(av::hex(selected))
+        << ",\"configuration_readback\":" << json_string(readback) << ",\"readback_verified\":" << (exact?"true":"false")
         << ",\"sample_rate\":" << profile_.sample_rate << ",\"bits\":" << profile_.bits << ",\"target_kbps\":" << profile_.kbps << ",\"stream_started\":false}\n";
 }
 void MediaSession::open_media() {
@@ -172,14 +177,18 @@ MediaSession::~MediaSession() {
 void inspect_playback_compatibility(Profile profile) {
     av::Bytes caps;
     ULONG mtu=0;
+    av::ConfigurationReadback readback=av::ConfigurationReadback::unverified;
     {
         MediaSession session(target_device().address,profile,false);
         session.discover();session.configure(profile);session.open_media();
         caps=session.peer_capabilities();mtu=session.media_info().OutMtu;
+        readback=session.configuration_readback();
         if (encoded_frame_bytes(profile)>mtu-media_header_bytes) throw std::runtime_error("Selected bitrate exceeds the negotiated media MTU");
         session.close_prepared();
     }
+    const bool exact=readback==av::ConfigurationReadback::exact;
     std::cout<<"{\"event\":\"playback_compatibility\",\"compatible\":true,\"peer_capabilities\":"<<json_string(av::hex(caps))
+        <<",\"configuration_readback\":"<<json_string(exact?"exact":"capability_echo")<<",\"readback_verified\":"<<(exact?"true":"false")
         <<",\"media_mtu\":"<<mtu<<",\"stream_started\":false}"<<std::endl;
 }
 }

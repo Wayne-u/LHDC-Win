@@ -23,6 +23,7 @@ public:
     void open_media();
     void close_prepared();
     const avdtp::Bytes& peer_capabilities() const { return peer_caps_; }
+    avdtp::ConfigurationReadback configuration_readback() const { return stream_.value().configuration_readback(); }
     void start(std::uint32_t block_samples);
     void check();
     SendTiming send(std::span<const std::uint8_t> sdu);

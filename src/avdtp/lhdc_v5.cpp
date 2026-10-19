@@ -55,13 +55,33 @@ Bytes select_configuration(std::span<const std::uint8_t> raw,const Profile& prof
         throw std::runtime_error("Requested profile exceeds peer LHDC V5 capabilities");
     return local_capabilities(profile);
 }
-void verify_configuration(std::span<const std::uint8_t> expected,std::span<const std::uint8_t> actual) {
+ConfigurationReadback verify_configuration(std::span<const std::uint8_t> expected,
+    std::span<const std::uint8_t> actual,std::span<const std::uint8_t> peer_capabilities) {
     auto left=capabilities(expected),right=capabilities(actual);
     auto order=[](const Capability& a,const Capability& b){return a.category<b.category;};
     std::sort(left.begin(),left.end(),order); std::sort(right.begin(),right.end(),order);
-    if (left.size()!=right.size()) throw std::runtime_error("GetConfiguration differs from selected configuration");
-    for (std::size_t i=0;i<left.size();++i)
-        if (left[i].category!=right[i].category || left[i].data!=right[i].data)
-            throw std::runtime_error("GetConfiguration differs from selected configuration");
+    const auto same=[](const Capability& a,const Capability& b){return a.category==b.category && a.data==b.data;};
+    if (std::equal(left.begin(),left.end(),right.begin(),right.end(),same)) return ConfigurationReadback::exact;
+
+    // Some peers echo their advertised codec capabilities after accepting
+    // SetConfiguration. Accept only that exact codec, with an optional empty
+    // Delay Reporting item; this does not verify the peer's active PCM format.
+    if (right.size()==3 && right.back().category==8 && right.back().data.empty()) right.pop_back();
+    if (left.size()!=2 || right.size()!=2 || left[0].category!=1 || left[1].category!=7 ||
+        right[0].category!=1 || right[1].category!=7 || !left[0].data.empty() || !right[0].data.empty())
+        throw std::runtime_error("GetConfiguration differs from selected configuration");
+
+    const auto selected=v5_capabilities(expected);
+    const auto peer=v5_capabilities(peer_capabilities);
+    if (selected.sample_rates.size()!=1 || selected.bit_depths.size()!=1 ||
+        std::find(peer.sample_rates.begin(),peer.sample_rates.end(),selected.sample_rates[0])==peer.sample_rates.end() ||
+        std::find(peer.bit_depths.begin(),peer.bit_depths.end(),selected.bit_depths[0])==peer.bit_depths.end() ||
+        selected.min_kbps>selected.max_kbps || selected.min_kbps<peer.min_kbps || selected.max_kbps>peer.max_kbps)
+        throw std::runtime_error("Selected configuration exceeds the advertised LHDC V5 capabilities");
+
+    const auto advertised=capabilities(peer_capabilities);
+    const auto codec=std::find_if(advertised.begin(),advertised.end(),[](const Capability& cap){return cap.category==7;});
+    if (right[1].data!=codec->data) throw std::runtime_error("GetConfiguration differs from selected configuration");
+    return ConfigurationReadback::capability_echo;
 }
 }

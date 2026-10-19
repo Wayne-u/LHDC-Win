@@ -113,7 +113,7 @@ int main() {
             if (signal==av::Signal::set_configuration) require(payload==av::unhex("0c040100070d00ff3a050000354c10d4110000"),"Stream source/sink configuration SEIDs");
             else require(payload==av::Bytes{12},"Stream command remote SEID");
             return av::Bytes{};
-        },3,caps);
+        },3,caps,caps);
         rejects([&]{stream.start();},"Start before configuration");
         stream.configure();
         require(stream.state()==av::StreamState::configured &&
@@ -134,7 +134,7 @@ int main() {
             steps.push_back(signal);
             if (signal==av::Signal::get_configuration) return av::Bytes{};
             return av::Bytes{};
-        },3,caps);
+        },3,caps,caps);
         rejects([&]{mismatch.configure();},"Configuration readback must match before Open");
         rejects([&]{mismatch.open();},"Readback failure must not permit Open");
         mismatch.abort();
@@ -143,7 +143,7 @@ int main() {
             if (signal==av::Signal::get_configuration) return caps;
             if (signal==av::Signal::start) throw std::runtime_error("Captured Start reject");
             return av::Bytes{};
-        },3,caps);
+        },3,caps,caps);
         rejection.configure(); rejection.open(); rejection.media_ready();
         rejects([&]{rejection.start();},"Start reject stops streaming");
         require(rejection.state()==av::StreamState::opened,"Start reject cannot mark stream active");
@@ -246,8 +246,8 @@ int main() {
         rejects([]{av::unhex("012");},"Odd hex input");
         rejects([]{av::unhex("0z");},"Invalid hex input");
         require(av::unhex("00 01\nff")==av::Bytes{0,1,255},"Whitespace in hex");
-        av::verify_configuration(caps,caps);
-        rejects([&]{auto actual=caps;actual[12]=4;av::verify_configuration(caps,actual);},"GetConfiguration mismatch");
+        av::verify_configuration(caps,caps,caps);
+        rejects([&]{auto actual=caps;actual[12]=4;av::verify_configuration(caps,actual,caps);},"GetConfiguration mismatch");
         lhdc::Encoder first,second;
         require(first.block_samples()==240 && first.block_bytes()==960,"PCM block dimensions");
         rejects([&]{first.encode(av::Bytes(959));},"Partial PCM input");

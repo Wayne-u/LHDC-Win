@@ -1,6 +1,8 @@
 # Windows LHDC
 
-面向 Windows 11 22H2 及以后版本（构建号 22621+）的 x64 LHDC V5 播放驱动与控制面板。0.8.7 提供通用播放模式：按已配对的蓝牙 Audio Sink 选择耳机，安装时验证其真实 LHDC V5 能力，不再按品牌、VID/PID 或耳机名称限制播放。一次只管理一台 LHDC 耳机。
+面向 Windows 11 22H2 及以后版本（构建号 22621+）的 x64 LHDC V5 播放驱动与控制面板。0.8.8 提供通用播放模式：按已配对的蓝牙 Audio Sink 选择耳机，安装时验证其真实 LHDC V5 能力，不再按品牌、VID/PID 或耳机名称限制播放。一次只管理一台 LHDC 耳机。
+
+0.8.8 针对 Free4 日志增加受限的配置读回兼容，区分精确配置与原样返回的能力集合；Free4 媒体建连和播放仍待实机验证。安装前检查改为明确的中文提示，说明第三方驱动绑定、测试签名模式或 HVCI 加载条件问题。
 
 通用模式在安装时探测 AVRCP 绝对音量：支持时统一 Windows 滑块与耳机增益，PCM 不再重复衰减；不支持时保留 Windows 软件音量播放，耳机自身增益独立。两种模式都按蓝牙地址保存音量和静音，重连后恢复。本机 Enco X4 音量／静音应答、服务重启记忆通过，用户确认听感跟随滑块且断开重连保留音量。通用模式实机证据范围仍为 Enco X4、Windows 11 28000 和本机 Realtek，其他型号及软件音量路径尚未实测。
 
@@ -92,11 +94,11 @@ pwsh -NoProfile -File .\scripts\Build.ps1 -Target UI -Run
 pwsh -NoProfile -File .\scripts\Publish.ps1
 ```
 
-当前源码生成 `build/LHDC-Win-0.8.7-win-x64-test.zip` 和对应 `.sha256`，预编译包见上文下载链接；文件名中的 `test` 表示驱动使用测试签名。ZIP 根目录包含 `LHDC-ControlPanel.exe`，以及 `backend`、`drivers`、`runtime/powershell`、`scripts`、`licenses`；解压完整目录后双击 EXE 即可打开面板。UI 自包含 .NET，原生后端使用静态 MSVC 运行库，PowerShell 使用包内运行时；无需用户预装 .NET、PowerShell 或 VC++ 运行库，也不依赖原工作区、用户名或当前工作目录。
+当前源码生成 `build/LHDC-Win-0.8.8-win-x64-test.zip` 和对应 `.sha256`，预编译包见上文下载链接；文件名中的 `test` 表示驱动使用测试签名。ZIP 根目录包含 `LHDC-ControlPanel.exe`，以及 `backend`、`drivers`、`runtime/powershell`、`scripts`、`licenses`；解压完整目录后双击 EXE 即可打开面板。UI 自包含 .NET，原生后端使用静态 MSVC 运行库，PowerShell 使用包内运行时；无需用户预装 .NET、PowerShell 或 VC++ 运行库，也不依赖原工作区、用户名或当前工作目录。
 
 发布器只收集四个后端程序、已验签的两类驱动包、测试公钥证书、部署脚本、运行时与许可证，不打包测试程序、调试符号、日志、私钥或部署恢复状态。`release.json` 记录版本、源码提交、工作区是否有未提交改动及依赖，`checksums.json` 记录逐文件 SHA256。`-NoArchive` 仅生成 `build/app`，适用于本地运行。
 
-需要保留现有 `build/app` 时，可传入 `-OutputDirectory build/app-0.8.7`，将新包写入独立目录；输出只允许 `build` 下的 `app` 或 `app-*` 目录。发布只生成文件，不自动更新正在运行的服务。
+需要保留现有 `build/app` 时，可传入 `-OutputDirectory build/app-0.8.8`，将新包写入独立目录；输出只允许 `build` 下的 `app` 或 `app-*` 目录。发布只生成文件，不自动更新正在运行的服务。
 
 驱动安装继续使用现有测试模式流程，首次应用需要管理员授权，测试模式及原有加载条件须事先满足；本包不会自动修改启动配置、Secure Boot 或内存完整性设置。部署子进程使用进程级执行策略运行随包脚本，不更改机器或用户的 PowerShell 执行策略。目标电脑先通过 Windows 配对耳机，再在面板选择并应用驱动。面板与部署日志写入用户 LocalAppData，服务及恢复状态使用系统 ProgramData。蓝牙传输使用微软协议栈。此包为测试签名驱动发行包，通用播放模式、其他系统构建与蓝牙型号仍需实测。
 

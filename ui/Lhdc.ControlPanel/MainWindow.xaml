@@ -18,7 +18,7 @@
                     <Button x:Name="SettingsNav" Content="音频设置" Click="ShowSettings" Style="{StaticResource SelectedNavigation}" Margin="0,0,0,8"/>
                     <Button x:Name="DiagnosticsNav" Content="诊断日志" Click="ShowDiagnostics" Style="{StaticResource Navigation}"/>
                 </StackPanel>
-                <TextBlock Grid.Row="3" Text="v0.8.7" Style="{StaticResource Hint}" Margin="12,0,0,0"/>
+                <TextBlock Grid.Row="3" Text="v0.8.8" Style="{StaticResource Hint}" Margin="12,0,0,0"/>
             </Grid>
         </Border>
         <Grid Grid.Column="1" Margin="28,26,28,22">
